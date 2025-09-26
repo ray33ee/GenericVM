@@ -1,0 +1,2 @@
+# Symbol table with entries for each function and a final entry for top level code (i.e. any statements in the module)
+# This must be versatile, working with code that has a module containing statements, main, functions, and any combination of these

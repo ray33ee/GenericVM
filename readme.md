@@ -60,6 +60,11 @@ Allow addressing of arbitrary sections of memory initialised by the interpreter.
 
 Since each Vm is different, users will want to create custom functions specific to their tasks. In the python-like code they are called in the same way as subroutines, but they do not require the call stack (and if constants are used they do not require the operand stack either) and are implemented by the interpreter directly.
 
+## If expression
+
+Equivalent to Cs ternary ? operator
+
+## Assertions
 
 # Levels
 
