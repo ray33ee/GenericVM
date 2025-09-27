@@ -1,22 +1,18 @@
 import ast
 from hr import ast_to_hr, dump, Walker
 from symbols import Symbols
+from compiler import compile
 
 at = ast.parse("""
 
-x: int = 44
 
-x = x + 3
+thing(4, stuff(67))
 
-y: float = 2.3
+def thing(l: int, k: int) -> int:
+    return l + k
 
-def thing(l: int) -> NoneType:
+def stuff(l: int) -> int:
     return l
-
-def do_something(a: int, b: int) -> int:
-    return a + b + x
-
-c: int = 44
 
 
 """)
@@ -29,14 +25,8 @@ print(dump(h))
 
 s = Symbols(h)
 
+c = compile(h, s, set(), set())
 
-w = Walker()
-
-w.walk(h)
-
-print(f"Top: {s.top_level}")
-
-for f, s in s.functions.items():
-    print(f"{f}: {s}")
+print(c)
 
 

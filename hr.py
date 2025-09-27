@@ -14,7 +14,7 @@ class Statement(HRNode):
 class HRConstructor(ast.NodeVisitor):
 
     def generic_visit(self, node):
-        raise Exception(f"Node '{str(type(node).__name__)}' not allowed (line: {node.lineno})")
+        raise Exception(f"Node '{str(type(node).__name__)}' not allowed")
 
     def traverse(self, node):
         if isinstance(node, list):
@@ -80,7 +80,12 @@ class HRConstructor(ast.NodeVisitor):
         return FunctionDef(node.lineno, node.name, args, self.traverse(node.body), return_annotation)
 
     def visit_Return(self, node):
-        return Return(node.lineno, self.traverse(node.value))
+
+        if node.value is None:
+            return Return(node.lineno, None)
+        else:
+            return Return(node.lineno, self.traverse(node.value))
+
 
     def visit_Assign(self, node):
         if len(node.targets) != 1:
@@ -166,7 +171,7 @@ class HRConstructor(ast.NodeVisitor):
         return BinOp(node.lineno, self.traverse(node.left), node.op, self.traverse(node.right))
 
     def visit_UnaryOp(self, node):
-        return UnaryOp(node.lineno, self.traverse(node.operand), type(node.op).__name__)
+        return UnaryOp(node.lineno, self.traverse(node.operand), node.op)
 
     def visit_IfExp(self, node):
         return IfExpr(node.lineno, self.traverse(node.test), self.traverse(node.body), self.traverse(node.orelse))
@@ -214,6 +219,7 @@ class HRConstructor(ast.NodeVisitor):
 
 
 
+
 class Argument(HRNode):
     def __init__(self, lineno: int, name: str, annotation: str):
         self.lineno = lineno
@@ -237,9 +243,9 @@ class BinOp(Expression):
         self.right = right
 
 class UnaryOp(Expression):
-    def __init__(self, lineno: int, operand: Expression, operator: str):
+    def __init__(self, lineno: int, operand: Expression, operator: ast.unaryop):
         self.lineno = lineno
-        self.left = operand
+        self.operand = operand
         self.operator = operator
 
 class Name(Expression):
@@ -274,7 +280,7 @@ class Subscript(Expression):
 
 
 class Return(Statement):
-    def __init__(self, lineno: int, value: Expression):
+    def __init__(self, lineno: int, value: Expression | None):
         self.lineno = lineno
         self.value = value
 
@@ -396,6 +402,12 @@ class Walker:
             elif isinstance(value, HRNode):
                 self.walk(value)
 
+    def traverse(self, node):
+        if isinstance(node, list):
+            for n in node:
+                self.walk(n)
+        else:
+            self.walk(node)
 
     def walk(self, node: HRNode):
         method = 'visit_' + node.__class__.__name__
