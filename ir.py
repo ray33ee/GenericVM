@@ -2,10 +2,12 @@
 class Instruction:
     def __repr__(self):
         s = [type(self).__name__, "("]
-        for attr, value in vars(self).items():
+        for i, (attr, value) in enumerate(vars(self).items()):
             s.append(attr)
             s.append("=")
             s.append(str(value))
+            if i != len(vars(self)) - 1:
+                s.append(", ")
         s.append(")")
         return "".join(s)
 
@@ -55,15 +57,18 @@ class OpStackPopGlobal(Instruction):
 
 # Unconditional jump
 class Jump(Instruction):
-    pass
+    def __init__(self, location):
+        self.location = location
 
 # Jump if top of op stack is non-zero (pops op stack)
 class JumpIfTrue(Instruction):
-    pass
+    def __init__(self, location):
+        self.location = location
 
 # Jump if top of op stack is zero (pops op stack)
 class JumpIfFalse(Instruction):
-    pass
+    def __init__(self, location):
+        self.location = location
 
 
 ###### Conversion
@@ -86,7 +91,8 @@ class Call(Instruction):
 
 # Return to the link address stored in the call stack
 class Return(Instruction):
-    pass
+    def __init__(self, arg_count):
+        self.arg_count = arg_count
 
 # Allocate machine words for local variables
 class LocalAlloc(Instruction):
@@ -126,20 +132,30 @@ class GreaterThanEqualTo(Instruction):
 # Allows built-in instructions that can be called in code but executed by VM.
 # Built-in instructions pass arguments as immediates and DO NOT use the op stack OR the call stack (as a result they must pass constants)
 class BuiltInInstruction(Instruction):
-    pass
+    def __init__(self, name, args):
+        self.name = name
+        self.args = args
 
 
 # Allows built-in functions that can be called in code but executed by VM.
 # Built-in functions pass arguments on the op stack and DO NOT use the call stack
 # It is down to the VM implementor to ensure they remove the correct number of items from the stack
 class BuiltInFunction(Instruction):
-    pass
+    def __init__(self, name, args):
+        self.name = name
+        self.args = args
 
 
 
 ###### Binary ops - Each instruction pops two values, operates on them, then pushes the result
 
 class Add(Instruction):
+    pass
+
+class Sub(Instruction):
+    pass
+
+class Multiply(Instruction):
     pass
 
 
@@ -161,4 +177,14 @@ class LogicalNot(Instruction):
 
 # IfExp, C ternary instruction.
 class Ternary(Instruction):
+    pass
+
+###### Misc
+
+# If the top of the op stack is non-zero stop program
+class Assert(Instruction):
+    pass
+
+# Called to end program execution
+class Finish(Instruction):
     pass

@@ -108,10 +108,15 @@ class Symbols:
 
 
         for func in filter(lambda x : isinstance(x, hr.FunctionDef), self.module.body):
-            self.functions[func.name] = Symbols.process(func, False, top.declared).all
+            self.functions[func.name] = Symbols.process(func, False, top.declared).all, func
             #print(func.name + ": " + str(Symbols.process(func, False, top.declared).results()))
 
 
+    def count_args(self, func):
+        return len(self.functions[func][1].args)
+
+    def count_locals(self, func):
+        return len(list(filter(lambda x : x.is_global == False and x.is_arg == False, self.functions[func][0].values())))
 
     def process(statements, is_top_level: bool, globals = {}):
 

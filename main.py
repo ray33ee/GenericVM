@@ -2,18 +2,17 @@ import ast
 from hr import ast_to_hr, dump, Walker
 from symbols import Symbols
 from compiler import compile
+import interpreter
 
 at = ast.parse("""
 
+x: int = 10
+y: int = 100
 
-thing(4, stuff(67))
-
-def thing(l: int, k: int) -> int:
-    return l + k
-
-def stuff(l: int) -> int:
-    return l
-
+if x > y:
+    print(1)
+else:
+    print(2)
 
 """)
 
@@ -25,8 +24,14 @@ print(dump(h))
 
 s = Symbols(h)
 
-c = compile(h, s, set(), set())
+c = compile(h, s, {"finish": 0, "print": 1}, {})
+
 
 print(c)
+
+i = interpreter.Interpreter()
+
+i.run(c)
+
 
 

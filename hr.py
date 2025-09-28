@@ -156,7 +156,7 @@ class HRConstructor(ast.NodeVisitor):
         return Continue()
 
     def visit_AugAssign(self, node):
-        return Assign(node.lineno, node.lineno, self.traverse(node.target), BinOp(self.traverse(node.target), node.op, self.traverse(node.value)))
+        return Assign(node.lineno, self.traverse(node.target), BinOp(node.lineno, self.traverse(node.target), node.op, self.traverse(node.value)))
 
     def visit_BoolOp(self, node):
 
