@@ -2,6 +2,10 @@
 class Instruction:
     def __repr__(self):
         s = [type(self).__name__, "("]
+        if hasattr(self, "OPCODE"):
+            s.append("OPCODE=")
+            s.append(str(self.OPCODE))
+            s.append(", ")
         for i, (attr, value) in enumerate(vars(self).items()):
             s.append(attr)
             s.append("=")
@@ -15,40 +19,64 @@ class Instruction:
 
 # Push the value of a local variable onto the op stack
 class OpStackPushLocal(Instruction):
+
+    OPCODE = 0
+
     def __init__(self, offset: int):
         self.offset = offset
 
 # Pop the top of the op stack into a local variable
 class OpStackPopLocal(Instruction):
+
+    OPCODE = 1
+
     def __init__(self, offset: int):
         self.offset = offset
 
 # Push the value of an argument variable onto the op stack
 class OpStackPushArg(Instruction):
+
+    OPCODE = 2
+
     def __init__(self, offset: int):
         self.offset = offset
 
 # Pop the top of the op stack into an argument variable
 class OpStackPopArg(Instruction):
+
+    OPCODE = 3
+
     def __init__(self, offset: int):
         self.offset = offset
 
 # Push a literal onto the op stack
 class OpStackPushLiteral(Instruction):
+
+    OPCODE = 4
+
     def __init__(self, value):
         self.value = value
 
 # Pop a value off the op stack and push it into the call stack
 class OpStackPopToCallStack(Instruction):
+
+    OPCODE = 5
+
     pass
 
 # Push the value of a global variable onto the op stack
 class OpStackPushGlobal(Instruction):
+
+    OPCODE = 6
+
     def __init__(self, offset: int):
         self.offset = offset
 
 # Pop the top of the op stack into the global variable
 class OpStackPopGlobal(Instruction):
+
+    OPCODE = 7
+
     def __init__(self, offset: int):
         self.offset = offset
 
@@ -57,16 +85,25 @@ class OpStackPopGlobal(Instruction):
 
 # Unconditional jump
 class Jump(Instruction):
+
+    OPCODE = 20
+
     def __init__(self, location):
         self.location = location
 
 # Jump if top of op stack is non-zero (pops op stack)
 class JumpIfTrue(Instruction):
+
+    OPCODE = 21
+
     def __init__(self, location):
         self.location = location
 
 # Jump if top of op stack is zero (pops op stack)
 class JumpIfFalse(Instruction):
+
+    OPCODE = 22
+
     def __init__(self, location):
         self.location = location
 
@@ -86,21 +123,33 @@ class ConvertFloatToInt(Instruction):
 
 # Make a function call. Stores return address on call stack
 class Call(Instruction):
+
+    OPCODE = 40
+
     def __init__(self, location):
         self.location = location
 
 # Return to the link address stored in the call stack
 class Return(Instruction):
+
+    OPCODE = 41
+
     def __init__(self, arg_count):
         self.arg_count = arg_count
 
 # Allocate machine words for local variables
 class LocalAlloc(Instruction):
+
+    OPCODE = 42
+
     def __init__(self, variable_count: int):
         self.variable_count = variable_count
 
 # Allocate machine words for global variables
 class GlobalAlloc(Instruction):
+
+    OPCODE = 43
+
     def __init__(self, variable_count: int):
         self.variable_count = variable_count
 
@@ -109,21 +158,39 @@ class GlobalAlloc(Instruction):
 
 
 class Equal(Instruction):
+
+    OPCODE = 60
+
     pass
 
 class NotEqual(Instruction):
+
+    OPCODE = 61
+
     pass
 
 class LessThan(Instruction):
+
+    OPCODE = 62
+
     pass
 
 class GreaterThan(Instruction):
+
+    OPCODE = 63
+
     pass
 
 class LessThanEqualTo(Instruction):
+
+    OPCODE = 64
+
     pass
 
 class GreaterThanEqualTo(Instruction):
+
+    OPCODE = 65
+
     pass
 
 
@@ -150,27 +217,90 @@ class BuiltInFunction(Instruction):
 ###### Binary ops - Each instruction pops two values, operates on them, then pushes the result
 
 class Add(Instruction):
+
+    OPCODE = 100
+
     pass
 
 class Sub(Instruction):
+
+    OPCODE = 101
+
     pass
 
 class Multiply(Instruction):
+
+    OPCODE = 102
+
+    pass
+
+class And(Instruction):
+
+    OPCODE = 103
+
+    pass
+
+class Or(Instruction):
+
+    OPCODE = 104
+
+    pass
+
+class Xor(Instruction):
+
+    OPCODE = 105
+
+    pass
+
+class ShiftLeft(Instruction):
+
+    OPCODE = 106
+
+    pass
+
+class ShiftRight(Instruction):
+
+    OPCODE = 107
+
+    pass
+
+class LogicalAnd(Instruction):
+
+    OPCODE = 108
+
+    pass
+
+class LogicalOr(Instruction):
+
+    OPCODE = 109
+
     pass
 
 
 ###### Unary ops - Each instruction pops a value, operates on it, then pushes the result
 
 class UnaryNegative(Instruction):
+
+    OPCODE = 150
+
     pass
 
 class UnaryPositive(Instruction):
+
+    OPCODE = 151
+
     pass
 
 class OnesComplement(Instruction):
+
+    OPCODE = 152
+
     pass
 
 class LogicalNot(Instruction):
+
+    OPCODE = 153
+
     pass
 
 ###### Ternary

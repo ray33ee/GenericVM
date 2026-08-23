@@ -122,14 +122,14 @@ class HRConstructor(ast.NodeVisitor):
         step = 1
 
         if len(args) == 1:
-            stop = args[0].value
+            stop = self.traverse(args[0])
         elif len(args) == 2:
-            start = args[0].value
-            stop = args[1].value
+            start = self.traverse(args[0])
+            stop = self.traverse(args[1])
         elif len(args) == 3:
-            start = args[0].value
-            stop = args[1].value
-            step = args[2].value
+            start = self.traverse(args[0])
+            stop = self.traverse(args[1])
+            step = self.traverse(args[2])
 
         return For(node.lineno, self.traverse(node.target), start, stop, step, self.traverse(node.body))
 

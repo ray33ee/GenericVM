@@ -29,7 +29,7 @@ class _Compiler(hr.Walker):
 
 
     def generic_walk(self, node):
-        raise Exception(f"Node {type(node).__name__} not implemented for compiler")
+        raise Exception(f"Node '{type(node).__name__}' not implemented for compiler")
 
     def is_name_global(self, id):
         return id in self.table.top_level
@@ -44,6 +44,10 @@ class _Compiler(hr.Walker):
         self.traverse(node.body)
 
     def visit_FunctionDef(self, node):
+        skip = ir.Jump(None)
+
+        self.instructions.append(skip)
+
         self.context = self.table.functions[node.name]
 
         self.function_locations[node.name] = len(self.instructions)
@@ -51,6 +55,8 @@ class _Compiler(hr.Walker):
         self.instructions.append(ir.LocalAlloc(self.table.count_locals(node.name)))
 
         self.traverse(node.body)
+
+        skip.location = len(self.instructions)
 
         self.context = None
 
@@ -106,7 +112,7 @@ class _Compiler(hr.Walker):
             #Call contains a string identifying the caller which is later replaced by an address-like index
             self.instructions.append(ir.Call(node.func))
         elif node.func in self.bi_instructions:
-            expected_arg_count = self.bi_instructions[node.func]
+            expected_arg_count = self.bi_instructions[node.func][0]
 
             if expected_arg_count != len(node.args):
                 raise Exception(f"Built in instruction '{node.func}' expects {expected_arg_count} args, found {len(node.args)}. (lineno: {node.lineno})")
@@ -114,7 +120,7 @@ class _Compiler(hr.Walker):
             self.instructions.append(ir.BuiltInInstruction(node.func, self.traverse(node.args)))
         else:
             #todo: implement the built in functions and instructions
-            raise Exception(f"Built in functions and instructions not currently supported")
+            raise Exception(f"Built in functions and instructions not currently supported '{node.func}'")
 
     def visit_If(self, node):
         end = ir.JumpIfFalse(None)
@@ -136,6 +142,69 @@ class _Compiler(hr.Walker):
             self.traverse(node.orelse)
 
             else_jump.location = len(self.instructions)
+
+    def visit_For(self, node):
+        # 1. Make sure the Forloop is suitable - target is just a Name, iter is just a range, etc.
+        # 2. Get the start, stop and end for the given range
+        # 3. Initialise the variable with the start value
+        symbol = self.context[0][node.assignable.id]
+        print(f"symbol: {symbol}")
+
+        if isinstance(node.start, int):
+            self.instructions.append(ir.OpStackPushLiteral(node.start))
+        else:
+            self.traverse(node.start)
+
+        if symbol.is_arg:
+            self.instructions.append(ir.OpStackPopArg(symbol.stack_offset))
+        else:
+            self.instructions.append(ir.OpStackPopLocal(symbol.stack_offset))
+        # 4. Insert a loop label
+        loop_location = len(self.instructions)
+        # 5. If Target variable >= stop, goto done label
+        done = ir.JumpIfFalse(None)
+
+        if symbol.is_arg:
+            self.instructions.append(ir.OpStackPushArg(symbol.stack_offset))
+        else:
+            self.instructions.append(ir.OpStackPushLocal(symbol.stack_offset))
+
+        self.traverse(node.end)
+
+        self.instructions.append(ir.LessThan())
+
+        self.instructions.append(done)
+
+        # 6. Body of loop
+        self.traverse(node.body)
+
+        # 7. Add step to i
+        if symbol.is_arg:
+            self.instructions.append(ir.OpStackPushArg(symbol.stack_offset))
+        else:
+            self.instructions.append(ir.OpStackPushLocal(symbol.stack_offset))
+
+        if isinstance(node.step, int):
+            self.instructions.append(ir.OpStackPushLiteral(node.step))
+        else:
+            self.traverse(node.step)
+
+        self.instructions.append(ir.Add())
+
+        if symbol.is_arg:
+            self.instructions.append(ir.OpStackPopArg(symbol.stack_offset))
+        else:
+            self.instructions.append(ir.OpStackPopLocal(symbol.stack_offset))
+
+        # 8. Goto loop label
+        self.instructions.append(ir.Jump(loop_location))
+
+        # 9. Insert done label
+
+        done.location = len(self.instructions)
+
+
+
 
 
     def visit_While(self, node):
@@ -212,6 +281,20 @@ class _Compiler(hr.Walker):
             self.instructions.append(ir.LessThanEqualTo())
         elif op == ast.GtE:
             self.instructions.append(ir.GreaterThanEqualTo())
+        elif op == ast.BitAnd:
+            self.instructions.append(ir.And())
+        elif op == ast.BitOr:
+            self.instructions.append(ir.Or())
+        elif op == ast.BitXor:
+            self.instructions.append(ir.Xor())
+        elif op == ast.LShift:
+            self.instructions.append(ir.ShiftLeft())
+        elif op == ast.RShift:
+            self.instructions.append(ir.ShiftRight())
+        elif op == ast.And:
+            self.instructions.append(ir.LogicalAnd)
+        elif op == ast.Or:
+            self.instructions.append(ir.LogicalOr)
         else:
             #todo: Add support for remaining binops
             raise Exception(f"Bin op {op.__name__} is not supported yet")

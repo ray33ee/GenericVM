@@ -48,23 +48,13 @@ If subroutines are disabled, functions can be used in the python=like code, but 
 
 Implemented at the top of the call stack via ALLOC 
 
-## Operand stack
-
-Integer arithmetic, float arithmetic and subroutines all use the operand stack, so all but the most basic compilers will need this. 
-
-## Memory blocks (mem[x], mem1[y], etc. via LOAD and STORE)
-
-Allow addressing of arbitrary sections of memory initialised by the interpreter. Support read and writing words. This will allow pointer-like behaviour.
-
 ## Custom functions
 
-Since each Vm is different, users will want to create custom functions specific to their tasks. In the python-like code they are called in the same way as subroutines, but they do not require the call stack (and if constants are used they do not require the operand stack either) and are implemented by the interpreter directly.
+Since each VM is different, users will want to create custom functions specific to their tasks. In the python-like code they are called in the same way as subroutines, but they do not require the call stack (and if constants are used they do not require the operand stack either) and are implemented by the interpreter directly.
 
 ## If expression
 
 Equivalent to Cs ternary ? operator
-
-## Assertions
 
 # Levels
 

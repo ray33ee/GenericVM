@@ -39,6 +39,7 @@ class Interpreter:
 
             op = instructions[pc]
 
+
             if isinstance(op, ir.Call):
                 call_stack.append(LinkAddress(pc + 1))
 
@@ -81,9 +82,9 @@ class Interpreter:
             elif isinstance(op, ir.OpStackPopArg):
                 call_stack[bp-2 - op.offset].inner = op_stack.pop()
             elif isinstance(op, ir.OpStackPushGlobal):
-                pass
+                op_stack.append(globals[op.offset])
             elif isinstance(op, ir.OpStackPopGlobal):
-                pass
+                globals[op.offset] = op_stack.pop()
             elif isinstance(op, ir.OpStackPopToCallStack):
                 call_stack.append(Argument(op_stack.pop()))
             elif isinstance(op, ir.OpStackPushLiteral):
@@ -91,10 +92,12 @@ class Interpreter:
             elif isinstance(op, ir.BuiltInInstruction):
                 name = op.name
 
-                if name == "finish":
-                    break
-                elif name == "print":
+                if name == "stop":
+                    return None
+                elif name == "printi":
                     print(f"Print function: {op_stack.pop()}")
+                elif name == "quit":
+                    return op_stack.pop()
             elif isinstance(op, ir.Jump):
                 pc = op.location
                 continue
@@ -119,6 +122,7 @@ class Interpreter:
                 a = op_stack.pop()
                 op_stack.append(int(a < b))
             elif isinstance(op, ir.GreaterThan):
+                print(op_stack)
                 b = op_stack.pop()
                 a = op_stack.pop()
                 op_stack.append(int(a > b))
@@ -142,8 +146,39 @@ class Interpreter:
                 b = op_stack.pop()
                 a = op_stack.pop()
                 op_stack.append(a * b)
+            elif isinstance(op, ir.UnaryNegative):
+                a = op_stack.pop()
+                op_stack.append(-a)
+            elif isinstance(op, ir.And):
+                b = op_stack.pop()
+                a = op_stack.pop()
+                op_stack.append(a & b)
+            elif isinstance(op, ir.Or):
+                b = op_stack.pop()
+                a = op_stack.pop()
+                op_stack.append(a | b)
+            elif isinstance(op, ir.Xor):
+                b = op_stack.pop()
+                a = op_stack.pop()
+                op_stack.append(a ^ b)
+            elif isinstance(op, ir.ShiftLeft):
+                b = op_stack.pop()
+                a = op_stack.pop()
+                op_stack.append(a << b)
+            elif isinstance(op, ir.ShiftRight):
+                b = op_stack.pop()
+                a = op_stack.pop()
+                op_stack.append(a >> b)
+            elif isinstance(op, ir.OnesComplement):
+                a = op_stack.pop()
+                op_stack.append(~a)
+
+            else:
+                raise Exception(f"Unknown or unhandled instruction f{op}")
 
 
 
 
             pc += 1
+
+        return op_stack[0] if len(op_stack) != 0 else None
