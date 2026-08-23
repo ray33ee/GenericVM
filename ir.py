@@ -309,6 +309,33 @@ class LogicalNot(Instruction):
 class Ternary(Instruction):
     pass
 
+###### Heap
+
+class Store(Instruction):
+    pass
+
+
+class Load(Instruction):
+    pass
+
+###### Memory
+
+class Malloc(Instruction):
+    pass
+
+
+class Free(Instruction):
+    pass
+
+
+###### Stack manip
+
+class Dupe(Instruction):
+    pass
+
+
+
+
 ###### Misc
 
 # If the top of the op stack is non-zero stop program

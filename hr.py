@@ -57,11 +57,11 @@ class HRConstructor(ast.NodeVisitor):
             # Todo: convert this function to allow annotations like list[int]
 
             if type(a.annotation) is not ast.Name:
-                raise Exception(f"All function args must be annotated with int | float (line: {node.lineno})")
+                raise Exception(f"All function args must be annotated with int | float | str | list (line: {node.lineno})")
 
             annotation = a.annotation.id
 
-            if annotation != "int" and annotation != "float":
+            if annotation != "int" and annotation != "float" and annotation != "str" and annotation != "list":
                 raise Exception(f"Only int and float type annotations for arguments are supported at this time (line: {node.lineno})")
 
             args.append(Argument(node.lineno, a.arg, a.annotation.id))
@@ -102,7 +102,7 @@ class HRConstructor(ast.NodeVisitor):
 
         annotation = node.annotation.id
 
-        if annotation != "int" and annotation != "float":
+        if annotation != "int" and annotation != "float" and annotation != "str" and annotation != "list":
             raise Exception(f"Only int and float type annotations for assignment annotations are supported at this time (line: {node.lineno})")
 
         return Assign(node.lineno, self.traverse(node.target), self.traverse(node.value), annotation)
@@ -198,16 +198,20 @@ class HRConstructor(ast.NodeVisitor):
         return Call(node.lineno, node.func.id, self.traverse(node.args))
 
     def visit_Constant(self, node):
-        if type(node.value) is not int and type(node.value) is not float:
+        if type(node.value) is not int and type(node.value) is not float and type(node.value) is not str:
             raise Exception(f"Only int and float constants are supported, '{type(node.value).__name__}' not allowed. (line: {node.lineno})")
 
         return Constant(node.lineno, node.value)
 
-    def visit_Subscript(self, node):
-        if type(node.value) is not ast.Name:
-            raise Exception(f"Can only subscript identifiers named at compile time. Cannot subscript expressions. (line: {node.lineno})")
+    def visit_List(self, node):
+        return List([self.traverse(e) for e in node.elts])
 
-        return Subscript(node.lineno, node.value.id, self.traverse(node.slice))
+
+
+
+    def visit_Subscript(self, node):
+
+        return Subscript(node.lineno, self.traverse(node.value), self.traverse(node.slice), node.ctx)
 
     def visit_Name(self, node):
         return Name(node.lineno, node.id)
@@ -258,6 +262,10 @@ class Constant(Expression):
         self.lineno = lineno
         self.value = value
 
+class List(Expression):
+    def __init__(self, elements: list[Expression]):
+        self.elements = elements
+
 class Call(Expression):
     def __init__(self, lineno: int, func: str, args: list[Expression]):
         self.lineno = lineno
@@ -265,18 +273,19 @@ class Call(Expression):
         self.args = args
 
 class IfExpr(Expression):
-    def __init__(self, lineno: int, condition: Expression, true_body: Expression, false_body: Expression):
+    def __init__(self, lineno: int, condition: Expression, true_expr: Expression, false_expr: Expression):
         self.lineno = lineno
         self.condition = condition
-        self.true_body = true_body
-        self.false_body = false_body
+        self.true_expr = true_expr
+        self.false_expr = false_expr
+
 
 class Subscript(Expression):
-    def __init__(self, lineno: int, name: str, index: Expression):
+    def __init__(self, lineno: int, value: Expression, slice: Expression, context: ast.expr_context):
         self.lineno = lineno
-        self.name = name
-        self.index = index
-
+        self.value = value
+        self.slice = slice
+        self.context = context
 
 
 class Return(Statement):

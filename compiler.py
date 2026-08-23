@@ -73,7 +73,14 @@ class _Compiler(hr.Walker):
 
     def visit_Assign(self, node):
         if isinstance(node.lhs, hr.Subscript):
-            raise Exception(f"Subscript assignment not supported yet")
+            #raise Exception(f"Subscript assignment not supported yet")
+
+            self.traverse(node.lhs) # Calculate the index
+            self.traverse(node.rhs) # Calculate the rvalue
+
+            self.instructions.append(ir.Store())
+
+            return
 
         self.traverse(node.rhs)
 
@@ -240,8 +247,24 @@ class _Compiler(hr.Walker):
 
 
 
+    def visit_IfExpr(self, node):
+        end = ir.JumpIfFalse(None)
 
+        self.traverse(node.condition)
 
+        self.instructions.append(end)
+
+        self.traverse(node.true_expr)
+
+        end.location = len(self.instructions) + 1
+
+        else_jump = ir.Jump(None)
+
+        self.instructions.append(else_jump)
+
+        self.traverse(node.false_expr)
+
+        else_jump.location = len(self.instructions)
 
 
     def visit_Name(self, node):
@@ -254,8 +277,66 @@ class _Compiler(hr.Walker):
             else:
                 self.instructions.append(ir.OpStackPushLocal(symbol.stack_offset))
 
+    def visit_Subscript(self, node):
+
+        self.traverse(node.value)
+        self.traverse(node.slice)
+        self.instructions.append(ir.Add())
+
+        if type(node.context) is ast.Load:
+            self.instructions.append(ir.Load())
+
+
+    def visit_List(self, node):
+        # First we call malloc which pushes the ptr on the op stack
+        self.instructions.append(ir.OpStackPushLiteral(len(node.elements) + 1))
+        self.instructions.append(ir.Malloc())
+
+        # First u64 contains the length of string
+        self.instructions.append(ir.Dupe())
+        self.instructions.append(ir.OpStackPushLiteral(len(node.elements)))
+        self.instructions.append(ir.Store())
+
+        for i, v in enumerate(node.elements):
+            self.instructions.append(ir.Dupe())
+            self.instructions.append(ir.OpStackPushLiteral(i + 1))
+            self.instructions.append(ir.Add())
+
+            self.traverse(v)
+
+            self.instructions.append(ir.Store())
+
+        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.Add())
+
     def visit_Constant(self, node):
-        self.instructions.append(ir.OpStackPushLiteral(node.value))
+
+        if type(node.value) is str:
+
+            # First we call malloc which pushes the ptr on the op stack
+            self.instructions.append(ir.OpStackPushLiteral(len(node.value) + 1))
+            self.instructions.append(ir.Malloc())
+
+            # First u64 contains the length of string
+            self.instructions.append(ir.Dupe())
+            self.instructions.append(ir.OpStackPushLiteral(len(node.value)))
+            self.instructions.append(ir.Store())
+
+            for i, c in enumerate(node.value):
+                self.instructions.append(ir.Dupe())
+                self.instructions.append(ir.OpStackPushLiteral(i+1))
+                self.instructions.append(ir.Add())
+                self.instructions.append(ir.OpStackPushLiteral(ord(c)))
+                self.instructions.append(ir.Store())
+
+            # Bit unorthodox, but the returned pointer points to the start of the list, so skip past the stored length
+            self.instructions.append(ir.OpStackPushLiteral(1))
+            self.instructions.append(ir.Add())
+
+
+        else:
+
+            self.instructions.append(ir.OpStackPushLiteral(node.value))
 
     def visit_BinOp(self, node):
 

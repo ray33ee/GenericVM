@@ -29,8 +29,12 @@ class Interpreter:
         call_stack = []
         globals = []
 
+        heap = {}
+
         pc = 0
         bp = 0
+
+        malloc_index = 0
 
         while True:
 
@@ -92,12 +96,16 @@ class Interpreter:
             elif isinstance(op, ir.BuiltInInstruction):
                 name = op.name
 
-                if name == "stop":
-                    return None
-                elif name == "printi":
-                    print(f"Print function: {op_stack.pop()}")
-                elif name == "quit":
-                    return op_stack.pop()
+                if name == "printi":
+                    print(f"Printi function: {op_stack.pop()}")
+                elif name == "prints":
+                    pointer = op_stack.pop()
+
+                    length = heap[pointer - 1]
+                    print(f"Prints function: ", end='')
+                    for i in range(length):
+                        print(chr(heap[pointer+i]), end='')
+
             elif isinstance(op, ir.Jump):
                 pc = op.location
                 continue
@@ -172,13 +180,37 @@ class Interpreter:
             elif isinstance(op, ir.OnesComplement):
                 a = op_stack.pop()
                 op_stack.append(~a)
+            elif isinstance(op, ir.Malloc):
+                size = op_stack.pop()
+
+                op_stack.append(malloc_index)
+
+                malloc_index += size
+            elif isinstance(op, ir.Free):
+                pass
+            elif isinstance(op, ir.Store):
+                value = op_stack.pop()
+                index = op_stack.pop()
+
+                heap[index] = value
+            elif isinstance(op, ir.Load):
+                index = op_stack.pop()
+
+                if index not in heap:
+                    heap[index] = 0
+
+                op_stack.append(heap[index])
+
+            elif isinstance(op, ir.Dupe):
+                op_stack.append(op_stack[-1])
+
 
             else:
-                raise Exception(f"Unknown or unhandled instruction f{op}")
+                raise Exception(f"Unknown or unhandled instruction {op}")
 
 
 
 
             pc += 1
-
+        print(heap)
         return op_stack[0] if len(op_stack) != 0 else None
