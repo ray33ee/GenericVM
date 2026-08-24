@@ -303,6 +303,30 @@ class LogicalNot(Instruction):
 
     pass
 
+
+class PrintInt(Instruction):
+    """Print one integer-like VM word."""
+
+    OPCODE = 162
+
+
+class PrintString(Instruction):
+    """Print one heap string."""
+
+    OPCODE = 163
+
+
+class PrintBool(Instruction):
+    """Print one boolean VM word as True or False."""
+
+    OPCODE = 164
+
+
+class PrintChar(Instruction):
+    """Print one Unicode character code."""
+
+    OPCODE = 165
+
 ###### Ternary
 
 # IfExp, C ternary instruction.
@@ -334,14 +358,28 @@ class Dupe(Instruction):
     pass
 
 
+class Drop(Instruction):
+    """Discard a compile-time number of words from the operand stack."""
+
+    OPCODE = 201
+
+    def __init__(self, count: int):
+        self.count = count
+
+
+class Roll(Instruction):
+    """Move the word at a compile-time depth to the top of the operand stack."""
+
+    OPCODE = 202
+
+    def __init__(self, depth: int):
+        self.depth = depth
+
+
 
 
 ###### Misc
 
 # If the top of the op stack is non-zero stop program
 class Assert(Instruction):
-    pass
-
-# Called to end program execution
-class Finish(Instruction):
     pass

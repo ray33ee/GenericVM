@@ -1,17 +1,104 @@
 import ast
+from dataclasses import dataclass
+from typesystem import ClassType, FLOAT, INT, NONE, STR, ListType, TupleType, Type, primitive_type
 
 # Higher representation - Trimmed version of python ast modified to work with GenericVM
+
+@dataclass(frozen=True)
+class SourceSpan:
+    filename: str | None
+    line: int
+    column: int
+    end_line: int
+    end_column: int
+    source_line: str | None = None
+
 
 class HRNode:
     pass
 
 class Expression(HRNode):
-    pass
+    def __init__(self):
+        # Filled by the dedicated type-analysis pass in milestone 2.
+        self.type: Type | None = None
 
 class Statement(HRNode):
     pass
 
+
+def parse_annotation(node: ast.expr, allowed: set[Type] | None = None) -> Type:
+    """Convert a supported annotation AST node into a source-language Type."""
+    if isinstance(node, ast.Subscript):
+        if not isinstance(node.value, ast.Name):
+            raise Exception(f"Invalid type annotation (line: {node.lineno})")
+
+        if node.value.id == "list":
+            annotation = ListType(parse_annotation(node.slice))
+        elif node.value.id == "tuple":
+            elements = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+            annotation = TupleType(tuple(parse_annotation(element) for element in elements))
+        else:
+            raise Exception(f"Unknown generic type '{node.value.id}' (line: {node.lineno})")
+    elif isinstance(node, ast.Name):
+        if node.id in {"list", "tuple"}:
+            raise Exception(
+                f"Type '{node.id}' requires element type arguments (line: {node.lineno})"
+            )
+
+        try:
+            annotation = primitive_type(node.id)
+        except ValueError:
+            annotation = ClassType(node.id)
+    elif isinstance(node, ast.Constant) and node.value is None:
+        annotation = NONE
+    else:
+        raise Exception(f"Invalid type annotation (line: {node.lineno})")
+
+    if allowed is not None and annotation not in allowed:
+        expected = " | ".join(sorted(str(item) for item in allowed))
+        raise Exception(
+            f"Type annotation must be one of {expected}, found {annotation} (line: {node.lineno})"
+        )
+
+    return annotation
+
+
+def parse_primitive_annotation(node: ast.expr, allowed: set[Type] | None = None) -> Type:
+    """Backward-compatible name for milestone 1 callers."""
+    annotation = parse_annotation(node, allowed)
+    if not isinstance(annotation, type(INT)):
+        raise Exception(f"Expected a primitive type annotation (line: {node.lineno})")
+    return annotation
+
 class HRConstructor(ast.NodeVisitor):
+
+    def __init__(self, source: str | None = None, filename: str | None = None):
+        self.filename = filename
+        self.source_lines = source.splitlines() if source is not None else None
+
+    def visit(self, node):
+        result = super().visit(node)
+        if isinstance(node, ast.AST) and isinstance(result, HRNode):
+            line = getattr(node, "lineno", 1)
+            end_line = getattr(node, "end_lineno", line)
+            column = getattr(node, "col_offset", 0)
+            end_column = getattr(node, "end_col_offset", column + 1)
+            source_line = None
+            if self.source_lines is not None and 0 < line <= len(self.source_lines):
+                source_line = self.source_lines[line - 1]
+                # CPython AST columns are UTF-8 byte offsets; diagnostics need
+                # character offsets to align carets with displayed source.
+                column = len(source_line.encode("utf-8")[:column].decode("utf-8"))
+                if end_line == line:
+                    end_column = len(
+                        source_line.encode("utf-8")[:end_column].decode("utf-8")
+                    )
+            result.source_span = SourceSpan(
+                self.filename, line, column, end_line, end_column, source_line
+            )
+            if not hasattr(result, "lineno"):
+                result.lineno = line
+        return result
 
     def generic_visit(self, node):
         raise Exception(f"Node '{str(type(node).__name__)}' not allowed")
@@ -25,9 +112,37 @@ class HRConstructor(ast.NodeVisitor):
     def visit_Module(self, node):
         body = self.traverse(node.body)
         for statement in body:
-            if not isinstance(statement, Statement) and type(statement) != FunctionDef:
+            if not isinstance(statement, Statement) and not isinstance(statement, (FunctionDef, ClassDef)):
                 raise Exception(f"Top level module statements must be functions or statements, found {statement}")
         return Module(body)
+
+    def visit_ClassDef(self, node):
+        if node.bases or node.keywords:
+            raise Exception(f"Class inheritance is not supported (line: {node.lineno})")
+        if node.decorator_list:
+            raise Exception(f"Class decorators are not supported (line: {node.lineno})")
+
+        fields = []
+        methods = []
+        for item in node.body:
+            if isinstance(item, ast.AnnAssign):
+                if not isinstance(item.target, ast.Name):
+                    raise Exception(f"Class fields must be named (line: {item.lineno})")
+                if item.value is not None:
+                    raise Exception(f"Class field defaults are not supported (line: {item.lineno})")
+                fields.append(FieldDef(item.lineno, item.target.id, parse_annotation(item.annotation)))
+            elif isinstance(item, ast.FunctionDef):
+                method = self.visit(item)
+                method.owner_class = node.name
+                method.qualified_name = f"{node.name}.{method.name}"
+                methods.append(method)
+            elif isinstance(item, ast.Pass):
+                continue
+            else:
+                raise Exception(
+                    f"Class bodies may contain only annotated fields and methods (line: {item.lineno})"
+                )
+        return ClassDef(node.lineno, node.name, fields, methods)
 
     def visit_FunctionDef(self, node):
         # Must contain a return annotation
@@ -52,30 +167,12 @@ class HRConstructor(ast.NodeVisitor):
         for a in node.args.args:
 
             if a.annotation is None:
-                Exception(f"All function args must be annotated (line: {node.lineno})")
+                annotation = None
+            else:
+                annotation = parse_annotation(a.annotation)
+            args.append(Argument(node.lineno, a.arg, annotation))
 
-            # Todo: convert this function to allow annotations like list[int]
-
-            if type(a.annotation) is not ast.Name:
-                raise Exception(f"All function args must be annotated with int | float | str | list (line: {node.lineno})")
-
-            annotation = a.annotation.id
-
-            if annotation != "int" and annotation != "float" and annotation != "str" and annotation != "list":
-                raise Exception(f"Only int and float type annotations for arguments are supported at this time (line: {node.lineno})")
-
-            args.append(Argument(node.lineno, a.arg, a.annotation.id))
-
-        if node.returns is None:
-            raise Exception(f"Functions must have a return annotation (use -> NoneType for functions that have no return value) (line: {node.lineno})")
-
-        if type(node.returns) is not ast.Name:
-            raise Exception(f"Return type annotations must be NoneType | int | float (line: {node.lineno})")
-
-        return_annotation = node.returns.id
-
-        if return_annotation != "int" and return_annotation != "float" and return_annotation != "NoneType":
-            raise Exception(f"Only int, float, None and NoneType type annotations are supported for return types at this time (line: {node.lineno})")
+        return_annotation = parse_annotation(node.returns) if node.returns is not None else None
 
         return FunctionDef(node.lineno, node.name, args, self.traverse(node.body), return_annotation)
 
@@ -100,10 +197,7 @@ class HRConstructor(ast.NodeVisitor):
         if type(node.target) is not ast.Name:
             raise Exception(f"LHS of annotated assignments must be a named variable (and not a subscript) (line: {node.lineno})")
 
-        annotation = node.annotation.id
-
-        if annotation != "int" and annotation != "float" and annotation != "str" and annotation != "list":
-            raise Exception(f"Only int and float type annotations for assignment annotations are supported at this time (line: {node.lineno})")
+        annotation = parse_annotation(node.annotation)
 
         return Assign(node.lineno, self.traverse(node.target), self.traverse(node.value), annotation)
 
@@ -192,19 +286,48 @@ class HRConstructor(ast.NodeVisitor):
         return BinOp(node.lineno, self.traverse(node.left), node.ops[0], self.traverse(node.comparators[0]))
 
     def visit_Call(self, node):
+        if isinstance(node.func, ast.Attribute):
+            return MethodCall(
+                node.lineno,
+                self.traverse(node.func.value),
+                node.func.attr,
+                self.traverse(node.args),
+            )
         if type(node.func) is not ast.Name:
-            raise Exception(f"Can only call functions named at compile time. Cannot call expressions. (line: {node.lineno})")
+            raise Exception(f"Can only call named functions or methods. (line: {node.lineno})")
 
         return Call(node.lineno, node.func.id, self.traverse(node.args))
 
     def visit_Constant(self, node):
-        if type(node.value) is not int and type(node.value) is not float and type(node.value) is not str:
-            raise Exception(f"Only int and float constants are supported, '{type(node.value).__name__}' not allowed. (line: {node.lineno})")
+        if type(node.value) not in {bool, int, float, str} and node.value is not None:
+            raise Exception(f"Constant type '{type(node.value).__name__}' is not supported. (line: {node.lineno})")
 
         return Constant(node.lineno, node.value)
 
     def visit_List(self, node):
-        return List([self.traverse(e) for e in node.elts])
+        return List(node.lineno, [self.traverse(e) for e in node.elts])
+
+    def visit_JoinedStr(self, node):
+        return JoinedStr(node.lineno, [self.traverse(value) for value in node.values])
+
+    def visit_FormattedValue(self, node):
+        if node.conversion != -1:
+            raise Exception(f"F-string conversions are not supported (line: {node.lineno})")
+        if node.format_spec is not None:
+            raise Exception(f"F-string format specifications are not supported (line: {node.lineno})")
+        return FormattedValue(node.lineno, self.traverse(node.value))
+
+    def visit_Tuple(self, node):
+        if isinstance(node.ctx, ast.Store):
+            return TupleTarget(node.lineno, [self.traverse(e) for e in node.elts])
+        return Tuple(node.lineno, [self.traverse(e) for e in node.elts])
+
+    def visit_Starred(self, node):
+        if not isinstance(node.ctx, ast.Load):
+            raise Exception(
+                f"Starred assignment targets are not currently supported (line: {node.lineno})"
+            )
+        return Starred(node.lineno, self.traverse(node.value))
 
 
 
@@ -216,6 +339,9 @@ class HRConstructor(ast.NodeVisitor):
     def visit_Name(self, node):
         return Name(node.lineno, node.id)
 
+    def visit_Attribute(self, node):
+        return Attribute(node.lineno, self.traverse(node.value), node.attr, node.ctx)
+
 
 
 
@@ -225,22 +351,40 @@ class HRConstructor(ast.NodeVisitor):
 
 
 class Argument(HRNode):
-    def __init__(self, lineno: int, name: str, annotation: str):
+    def __init__(self, lineno: int, name: str, annotation: Type | None):
         self.lineno = lineno
         self.name = name
         self.annotation = annotation
 
 class FunctionDef(HRNode):
-    def __init__(self, lineno: int, name: str, args: list[Argument], body: list[Statement], return_type: str):
+    def __init__(self, lineno: int, name: str, args: list[Argument], body: list[Statement], return_type: Type | None):
         self.lineno = lineno
         self.name = name
         self.args = args
         self.body = body
         self.return_type = return_type
+        self.owner_class = None
+        self.qualified_name = name
+
+
+class FieldDef(HRNode):
+    def __init__(self, lineno: int, name: str, field_type: Type):
+        self.lineno = lineno
+        self.name = name
+        self.type = field_type
+
+
+class ClassDef(HRNode):
+    def __init__(self, lineno: int, name: str, fields: list[FieldDef], methods: list[FunctionDef]):
+        self.lineno = lineno
+        self.name = name
+        self.fields = fields
+        self.methods = methods
 
 # Includes ast.BinOp, ast.BoolOp and ast.Compare
 class BinOp(Expression):
     def __init__(self, lineno: int, left: Expression, operator: ast.operator | ast.cmpop | ast.boolop, right: Expression):
+        super().__init__()
         self.lineno = lineno
         self.left = left
         self.operator = operator
@@ -248,32 +392,92 @@ class BinOp(Expression):
 
 class UnaryOp(Expression):
     def __init__(self, lineno: int, operand: Expression, operator: ast.unaryop):
+        super().__init__()
         self.lineno = lineno
         self.operand = operand
         self.operator = operator
 
 class Name(Expression):
     def __init__(self, lineno: int, id: str):
+        super().__init__()
         self.lineno = lineno
         self.id = id
 
 class Constant(Expression):
     def __init__(self, lineno: int, value: int | float):
+        super().__init__()
         self.lineno = lineno
         self.value = value
 
 class List(Expression):
-    def __init__(self, elements: list[Expression]):
+    def __init__(self, lineno: int, elements: list[Expression]):
+        super().__init__()
+        self.lineno = lineno
         self.elements = elements
+
+
+class Tuple(Expression):
+    def __init__(self, lineno: int, elements: list[Expression]):
+        super().__init__()
+        self.lineno = lineno
+        self.elements = elements
+
+
+class Starred(Expression):
+    def __init__(self, lineno: int, value: Expression):
+        super().__init__()
+        self.lineno = lineno
+        self.value = value
+
+
+class JoinedStr(Expression):
+    def __init__(self, lineno: int, values: list[Expression]):
+        super().__init__()
+        self.lineno = lineno
+        self.values = values
+
+
+class FormattedValue(Expression):
+    def __init__(self, lineno: int, value: Expression):
+        super().__init__()
+        self.lineno = lineno
+        self.value = value
+
+
+class TupleTarget(HRNode):
+    def __init__(self, lineno: int, elements: list[HRNode]):
+        self.lineno = lineno
+        self.elements = elements
+        self.type: Type | None = None
 
 class Call(Expression):
     def __init__(self, lineno: int, func: str, args: list[Expression]):
+        super().__init__()
         self.lineno = lineno
         self.func = func
         self.args = args
 
+
+class MethodCall(Expression):
+    def __init__(self, lineno: int, receiver: Expression, method: str, args: list[Expression]):
+        super().__init__()
+        self.lineno = lineno
+        self.receiver = receiver
+        self.method = method
+        self.args = args
+
+
+class Attribute(Expression):
+    def __init__(self, lineno: int, value: Expression, attr: str, context: ast.expr_context):
+        super().__init__()
+        self.lineno = lineno
+        self.value = value
+        self.attr = attr
+        self.context = context
+
 class IfExpr(Expression):
     def __init__(self, lineno: int, condition: Expression, true_expr: Expression, false_expr: Expression):
+        super().__init__()
         self.lineno = lineno
         self.condition = condition
         self.true_expr = true_expr
@@ -282,6 +486,7 @@ class IfExpr(Expression):
 
 class Subscript(Expression):
     def __init__(self, lineno: int, value: Expression, slice: Expression, context: ast.expr_context):
+        super().__init__()
         self.lineno = lineno
         self.value = value
         self.slice = slice
@@ -295,7 +500,7 @@ class Return(Statement):
 
 
 class Assign(Statement):
-    def __init__(self, lineno: int, lhs: Name | Subscript, rhs: Expression, annotation: str | None = None):
+    def __init__(self, lineno: int, lhs: Name | Subscript | Attribute | TupleTarget, rhs: Expression, annotation: Type | None = None):
         self.lineno = lineno
         self.lhs = lhs
         self.rhs = rhs
@@ -349,10 +554,13 @@ class Module(HRNode):
         self.body = body
 
 def filtered_vars(obj):
-    return {k: v for k, v in vars(obj).items() if not k.startswith("lineno")}
+    return {
+        k: v for k, v in vars(obj).items()
+        if not k.startswith("lineno") and k != "source_span"
+    }
 
-def ast_to_hr(node: ast.Module):
-    c = HRConstructor()
+def ast_to_hr(node: ast.Module, *, source: str | None = None, filename: str | None = None):
+    c = HRConstructor(source=source, filename=filename)
     return c.visit(node)
 
 def dump(node: "HRNode"):

@@ -1,30 +1,90 @@
 from itertools import count
 
-# Compiler needs the following:
-# - A list of features supported by the language
-# - A list of constants
-# - A list of built-in functions (using the op stack)
-# - A list of built-in functions (using constant immediates, no op stack)
+# The compiler always performs normal lowering. A target InstructionSet is
+# checked afterward, alongside its stack-based and immediate built-ins.
 
 import ir
 import hr
 import ast
+from instruction_set import (
+    CompilationResult,
+    InstructionOrigin,
+    InstructionSet,
+    validate_instruction_set,
+)
 from symbols import Symbols
+from typecheck import check_types
+from typesystem import BOOL, CHAR, FLOAT, INT, NONE, STR, BuiltinSignature, ClassType, TupleType, word_count
+
+class _InstructionBuffer(list):
+    """A list-compatible IR sink which records origin metadata on append."""
+
+    def __init__(self, compiler):
+        super().__init__()
+        self.compiler = compiler
+
+    def append(self, instruction):
+        super().append(instruction)
+        node = self.compiler.current_source_node
+        span = getattr(node, "source_span", None) if node is not None else None
+        construct = self.compiler.construct_name(node)
+        self.compiler.origins.append(InstructionOrigin(span, construct) if node else None)
+
 
 class _Compiler(hr.Walker):
     def __init__(self, table: Symbols, built_in_instructions: dict, built_in_functions: dict):
         self.table = table
-        self.instructions = []
+        self.current_source_node = None
+        self.origins = []
+        self.instructions = _InstructionBuffer(self)
         self.context = None
         self.bi_instructions = built_in_instructions
         self.bi_functions = built_in_functions
         self.function_locations = {}
         #todo: Make sure there are no conflicts between built in instructions, functions and user defined functions
-        print(self.table.top_level)
-        print(self.table.functions)
-
         self.breaks = []
         self.continues = []
+
+    @staticmethod
+    def construct_name(node):
+        if node is None:
+            return "compiler-generated instruction"
+        names = {
+            hr.Constant: "literal",
+            hr.List: "list literal",
+            hr.Tuple: "tuple expression",
+            hr.Call: "function call",
+            hr.MethodCall: "method call",
+            hr.FunctionDef: "function definition",
+            hr.ClassDef: "class definition",
+            hr.Assign: "assignment",
+            hr.Subscript: "subscript operation",
+            hr.Attribute: "field access",
+            hr.If: "if statement",
+            hr.IfExpr: "conditional expression",
+            hr.While: "while loop",
+            hr.For: "for loop",
+            hr.Return: "return statement",
+            hr.Assert: "assert statement",
+            hr.BinOp: "operator expression",
+            hr.UnaryOp: "unary expression",
+            hr.Expr: "expression statement",
+        }
+        if isinstance(node, hr.Constant) and isinstance(node.value, str):
+            return "string literal"
+        return names.get(type(node), type(node).__name__)
+
+    def walk(self, node):
+        previous = self.current_source_node
+        # Compiler-created helper HR nodes have no source span. Attribute their
+        # instructions to the surrounding real source construct instead.
+        self.current_source_node = (
+            node if hasattr(node, "source_span") or previous is None else previous
+        )
+        try:
+            return super().walk(node)
+        finally:
+            self.current_source_node = previous
 
 
 
@@ -36,25 +96,34 @@ class _Compiler(hr.Walker):
 
     def visit_Module(self, node):
         # Check for global variables first
-        global_var_count = len(self.table.top_level)
+        global_var_count = self.table.count_globals()
 
         if global_var_count != 0:
             self.instructions.append(ir.GlobalAlloc(global_var_count))
 
         self.traverse(node.body)
 
+    def visit_ClassDef(self, node):
+        self.traverse(node.methods)
+
     def visit_FunctionDef(self, node):
         skip = ir.Jump(None)
 
         self.instructions.append(skip)
 
-        self.context = self.table.functions[node.name]
+        qualified_name = node.qualified_name
+        self.context = self.table.functions[qualified_name]
 
-        self.function_locations[node.name] = len(self.instructions)
+        self.function_locations[qualified_name] = len(self.instructions)
 
-        self.instructions.append(ir.LocalAlloc(self.table.count_locals(node.name)))
+        self.instructions.append(ir.LocalAlloc(self.table.count_locals(qualified_name)))
 
         self.traverse(node.body)
+
+        if node.return_type == NONE and (
+            not node.body or not isinstance(node.body[-1], hr.Return)
+        ):
+            self.instructions.append(ir.Return(self.table.count_arg_words(qualified_name)))
 
         skip.location = len(self.instructions)
 
@@ -66,12 +135,28 @@ class _Compiler(hr.Walker):
         if node.value is not None:
             self.traverse(node.value)
 
-        self.instructions.append(ir.Return(len(self.context[1].args)))
+        self.instructions.append(ir.Return(self.table.count_arg_words(self.context[1].qualified_name)))
 
     def visit_Expr(self, node):
         self.traverse(node.expr)
+        preserve_entry_result = (
+            self.context is None
+            and isinstance(node.expr, hr.Call)
+            and node.expr.func == "main"
+        )
+        if not preserve_entry_result:
+            self.emit_projection(word_count(node.expr.type), 0, 0)
 
     def visit_Assign(self, node):
+        if isinstance(node.lhs, hr.TupleTarget):
+            self.traverse(node.rhs)
+            targets = self.flatten_tuple_target(node.lhs)
+            for target in reversed(targets):
+                symbol = self.name_symbol(target.id)
+                for relative_offset in reversed(range(symbol.word_width)):
+                    self.emit_pop_symbol(symbol, relative_offset)
+            return
+
         if isinstance(node.lhs, hr.Subscript):
             #raise Exception(f"Subscript assignment not supported yet")
 
@@ -82,16 +167,19 @@ class _Compiler(hr.Walker):
 
             return
 
-        self.traverse(node.rhs)
+        if isinstance(node.lhs, hr.Attribute):
+            self.traverse(node.lhs.value)
+            field = self.table.classes[node.lhs.resolved_class].fields[node.lhs.attr]
+            self.instructions.append(ir.OpStackPushLiteral(field.offset))
+            self.instructions.append(ir.Add())
+            self.traverse(node.rhs)
+            self.instructions.append(ir.Store())
+            return
 
-        if self.is_name_global(node.lhs.id):
-            self.instructions.append(ir.OpStackPopGlobal(self.table.top_level[node.lhs.id].stack_offset))
-        else:
-            symbol = self.context[0][node.lhs.id]
-            if symbol.is_arg:
-                self.instructions.append(ir.OpStackPopArg(symbol.stack_offset))
-            else:
-                self.instructions.append(ir.OpStackPopLocal(symbol.stack_offset))
+        self.traverse(node.rhs)
+        symbol = self.name_symbol(node.lhs.id)
+        for relative_offset in reversed(range(symbol.word_width)):
+            self.emit_pop_symbol(symbol, relative_offset)
 
     def visit_Break(self, node):
         b = ir.Jump(None)
@@ -106,28 +194,221 @@ class _Compiler(hr.Walker):
     def visit_Pass(self, node):
         pass
 
-    def visit_Call(self, node):
-        if node.func in self.table.functions:
+    def visit_Assert(self, node):
+        self.traverse(node.test)
+        self.instructions.append(ir.Assert())
 
-            #todo: make sure that the number of args in self.table.functions[node.func] matches len(node.args)
-            if self.table.count_args(node.func) != len(node.args):
-                raise Exception(f"User defined function '{node.func}' expects {self.table.count_args(node.func)} args, found {len(node.args)}. (lineno: {node.lineno})")
+    def visit_Call(self, node):
+        if hasattr(node, "streamed_class"):
+            self.traverse(node.args[0])
+            self.emit_streamed_auto_repr(self.table.classes[node.streamed_class])
+        elif hasattr(node, "streamed_method"):
+            self.traverse(node.args[0])
+            self.instructions.append(ir.OpStackPopToCallStack())
+            self.instructions.append(ir.Call(node.streamed_method))
+            self.instructions.append(ir.PrintString())
+        elif hasattr(node, "resolved_intrinsic"):
+            if node.resolved_intrinsic == "len_heap":
+                self.traverse(node.args[0])
+                self.instructions.append(ir.OpStackPushLiteral(1))
+                self.instructions.append(ir.Sub())
+                self.instructions.append(ir.Load())
+            elif node.resolved_intrinsic == "str_char":
+                self.emit_char_string(node.args[0])
+            else:
+                self.traverse(node.args[0])
+        elif hasattr(node, "resolved_builtin"):
+            if node.args and isinstance(node.args[0], hr.Call) and hasattr(node.args[0], "auto_repr_class"):
+                inner = node.args[0]
+                self.traverse(inner.args[0])
+                self.emit_streamed_auto_repr(self.table.classes[inner.auto_repr_class])
+                return
+            if node.args and isinstance(node.args[0], hr.JoinedStr):
+                for fragment in node.args[0].values:
+                    if isinstance(fragment, hr.FormattedValue):
+                        self.emit_streamed_formatted_value(fragment)
+                    elif fragment.value:
+                        self.traverse(fragment)
+                        self.emit_builtin("prints")
+                return
+            if node.args:
+                self.traverse(node.args[0])
+            else:
+                newline = hr.Constant(node.lineno, "\n")
+                newline.type = STR
+                self.visit_Constant(newline)
+            self.emit_builtin(node.resolved_builtin)
+        elif hasattr(node, "auto_repr_class"):
+            raise Exception("Automatic class strings may only be streamed by print")
+        elif hasattr(node, "resolved_method"):
+            self.traverse(node.args[0])
+            self.instructions.append(ir.OpStackPopToCallStack())
+            self.instructions.append(ir.Call(node.resolved_method))
+        elif node.func in self.table.classes:
+            class_info = self.table.classes[node.func]
+            constructor = class_info.methods["__init__"]
+            self.instructions.append(ir.OpStackPushLiteral(class_info.word_width))
+            self.instructions.append(ir.Malloc())
+            for argument in reversed(node.args):
+                self.traverse(argument)
+                for _ in range(word_count(argument.type)):
+                    self.instructions.append(ir.OpStackPopToCallStack())
+            self.instructions.append(ir.Dupe())
+            self.instructions.append(ir.OpStackPopToCallStack())
+            self.instructions.append(ir.Call(constructor.qualified_name))
+        elif node.func in self.table.functions:
+
+            if self.table.count_args(node.func) != node.expanded_argument_count:
+                raise Exception("Typed call argument count changed before code generation")
 
             for a in reversed(node.args):
                 self.traverse(a)
-                self.instructions.append(ir.OpStackPopToCallStack())
+                for _ in range(word_count(a.type)):
+                    self.instructions.append(ir.OpStackPopToCallStack())
             #Call contains a string identifying the caller which is later replaced by an address-like index
             self.instructions.append(ir.Call(node.func))
         elif node.func in self.bi_instructions:
-            expected_arg_count = self.bi_instructions[node.func][0]
+            expected_arg_count = len(self.bi_instructions[node.func].parameter_types)
 
-            if expected_arg_count != len(node.args):
-                raise Exception(f"Built in instruction '{node.func}' expects {expected_arg_count} args, found {len(node.args)}. (lineno: {node.lineno})")
+            if expected_arg_count != node.expanded_argument_count:
+                raise Exception("Typed built-in argument count changed before code generation")
 
             self.instructions.append(ir.BuiltInInstruction(node.func, self.traverse(node.args)))
+        elif node.func in self.bi_functions:
+            expected_arg_count = len(self.bi_functions[node.func].parameter_types)
+
+            if expected_arg_count != node.expanded_argument_count:
+                raise Exception("Typed built-in argument count changed before code generation")
+
+            self.instructions.append(ir.BuiltInFunction(node.func, self.traverse(node.args)))
         else:
             #todo: implement the built in functions and instructions
             raise Exception(f"Built in functions and instructions not currently supported '{node.func}'")
+
+    def visit_MethodCall(self, node):
+        for argument in reversed(node.args):
+            self.traverse(argument)
+            for _ in range(word_count(argument.type)):
+                self.instructions.append(ir.OpStackPopToCallStack())
+        self.traverse(node.receiver)
+        self.instructions.append(ir.OpStackPopToCallStack())
+        self.instructions.append(ir.Call(node.resolved_method))
+
+    def visit_Attribute(self, node):
+        self.traverse(node.value)
+        field = self.table.classes[node.resolved_class].fields[node.attr]
+        self.instructions.append(ir.OpStackPushLiteral(field.offset))
+        self.instructions.append(ir.Add())
+        self.instructions.append(ir.Load())
+
+    def emit_builtin(self, name):
+        if name == "printi":
+            self.instructions.append(ir.PrintInt())
+        elif name == "printb":
+            self.instructions.append(ir.PrintBool())
+        elif name == "prints":
+            self.instructions.append(ir.PrintString())
+        elif name == "printc":
+            self.instructions.append(ir.PrintChar())
+        elif name in self.bi_instructions:
+            self.instructions.append(ir.BuiltInInstruction(name, None))
+        elif name in self.bi_functions:
+            self.instructions.append(ir.BuiltInFunction(name, None))
+        else:
+            raise Exception(f"Resolved built-in '{name}' is unavailable")
+
+    def emit_char_string(self, character):
+        # Heap layout: [length, character], returned pointer: first character.
+        self.instructions.append(ir.OpStackPushLiteral(2))
+        self.instructions.append(ir.Malloc())
+        self.instructions.append(ir.Dupe())
+        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.Store())
+        self.instructions.append(ir.Dupe())
+        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.Add())
+        self.traverse(character)
+        self.instructions.append(ir.Store())
+        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.Add())
+
+    def visit_JoinedStr(self, node):
+        raise Exception("F-strings may only be streamed directly by print")
+
+    def visit_FormattedValue(self, node):
+        raise Exception("Formatted values may only be streamed directly by print")
+
+    def emit_streamed_formatted_value(self, node):
+        value_type = node.value.type
+        if value_type == INT:
+            self.traverse(node.value)
+            self.instructions.append(ir.PrintInt())
+        elif value_type == BOOL:
+            self.traverse(node.value)
+            self.instructions.append(ir.PrintBool())
+        elif value_type == STR:
+            self.traverse(node.value)
+            self.instructions.append(ir.PrintString())
+        elif value_type == CHAR:
+            self.traverse(node.value)
+            self.instructions.append(ir.PrintChar())
+        elif isinstance(value_type, ClassType):
+            self.traverse(node.value)
+            if hasattr(node, "resolved_method"):
+                self.instructions.append(ir.OpStackPopToCallStack())
+                self.instructions.append(ir.Call(node.resolved_method))
+                self.instructions.append(ir.PrintString())
+            elif hasattr(node, "auto_repr_class"):
+                self.emit_streamed_auto_repr(self.table.classes[node.auto_repr_class])
+            else:
+                raise Exception(f"No string representation for {value_type}")
+        else:
+            raise Exception(f"Cannot stream formatted value of type {value_type}")
+
+    def emit_streamed_auto_repr(self, class_info):
+        prefix = hr.Constant(class_info.definition.lineno, f"{class_info.name}(")
+        prefix.type = STR
+        self.visit_Constant(prefix)
+        self.instructions.append(ir.PrintString())
+        for index, field in enumerate(class_info.fields.values()):
+            if index:
+                separator = hr.Constant(class_info.definition.lineno, ", ")
+                separator.type = STR
+                self.visit_Constant(separator)
+                self.instructions.append(ir.PrintString())
+
+            self.instructions.append(ir.Dupe())
+            self.instructions.append(ir.OpStackPushLiteral(field.offset))
+            self.instructions.append(ir.Add())
+            self.instructions.append(ir.Load())
+            self.emit_streamed_value(field.type)
+
+        suffix = hr.Constant(class_info.definition.lineno, ")")
+        suffix.type = STR
+        self.visit_Constant(suffix)
+        self.instructions.append(ir.PrintString())
+        self.instructions.append(ir.Drop(1))
+
+    def emit_streamed_value(self, value_type):
+        if value_type == STR:
+            self.instructions.append(ir.PrintString())
+        elif value_type == CHAR:
+            self.instructions.append(ir.PrintChar())
+        elif value_type == INT:
+            self.instructions.append(ir.PrintInt())
+        elif value_type == BOOL:
+            self.instructions.append(ir.PrintBool())
+        elif isinstance(value_type, ClassType):
+            class_info = self.table.classes[value_type.name]
+            method = class_info.methods.get("__str__") or class_info.methods.get("__repr__")
+            if method is not None:
+                self.instructions.append(ir.OpStackPopToCallStack())
+                self.instructions.append(ir.Call(method.qualified_name))
+                self.instructions.append(ir.PrintString())
+            else:
+                self.emit_streamed_auto_repr(class_info)
+        else:
+            raise Exception(f"Cannot automatically stream {value_type}")
 
     def visit_If(self, node):
         end = ir.JumpIfFalse(None)
@@ -155,8 +436,6 @@ class _Compiler(hr.Walker):
         # 2. Get the start, stop and end for the given range
         # 3. Initialise the variable with the start value
         symbol = self.context[0][node.assignable.id]
-        print(f"symbol: {symbol}")
-
         if isinstance(node.start, int):
             self.instructions.append(ir.OpStackPushLiteral(node.start))
         else:
@@ -268,16 +547,20 @@ class _Compiler(hr.Walker):
 
 
     def visit_Name(self, node):
-        if self.is_name_global(node.id):
-            self.instructions.append(ir.OpStackPushGlobal(self.table.top_level[node.id].stack_offset))
-        else:
-            symbol = self.context[0][node.id]
-            if symbol.is_arg:
-                self.instructions.append(ir.OpStackPushArg(symbol.stack_offset))
-            else:
-                self.instructions.append(ir.OpStackPushLocal(symbol.stack_offset))
+        symbol = self.name_symbol(node.id)
+        for relative_offset in range(symbol.word_width):
+            self.emit_push_symbol(symbol, relative_offset)
 
     def visit_Subscript(self, node):
+
+        if isinstance(node.value.type, TupleType):
+            self.traverse(node.value)
+            self.emit_projection(
+                node.projection_total_width,
+                node.projection_offset,
+                node.projection_width,
+            )
+            return
 
         self.traverse(node.value)
         self.traverse(node.slice)
@@ -309,9 +592,18 @@ class _Compiler(hr.Walker):
         self.instructions.append(ir.OpStackPushLiteral(1))
         self.instructions.append(ir.Add())
 
+    def visit_Tuple(self, node):
+        self.traverse(node.elements)
+
+    def visit_Starred(self, node):
+        self.traverse(node.value)
+
     def visit_Constant(self, node):
 
-        if type(node.value) is str:
+        if type(node.value) is str and node.type == CHAR:
+            self.instructions.append(ir.OpStackPushLiteral(ord(node.value)))
+
+        elif type(node.value) is str:
 
             # First we call malloc which pushes the ptr on the op stack
             self.instructions.append(ir.OpStackPushLiteral(len(node.value) + 1))
@@ -334,71 +626,182 @@ class _Compiler(hr.Walker):
             self.instructions.append(ir.Add())
 
 
-        else:
+        elif node.value is not None:
+            literal = (
+                float(node.value)
+                if node.type == FLOAT and type(node.value) is int
+                else node.value
+            )
+            self.instructions.append(ir.OpStackPushLiteral(literal))
 
-            self.instructions.append(ir.OpStackPushLiteral(node.value))
+    def name_symbol(self, identifier):
+        if self.is_name_global(identifier):
+            return self.table.top_level[identifier]
+        return self.context[0][identifier]
+
+    def emit_push_symbol(self, symbol, relative_offset):
+        offset = symbol.stack_offset + relative_offset
+        if symbol.is_global:
+            self.instructions.append(ir.OpStackPushGlobal(offset))
+        elif symbol.is_arg:
+            self.instructions.append(ir.OpStackPushArg(offset))
+        else:
+            self.instructions.append(ir.OpStackPushLocal(offset))
+
+    def emit_pop_symbol(self, symbol, relative_offset):
+        offset = symbol.stack_offset + relative_offset
+        if symbol.is_global:
+            self.instructions.append(ir.OpStackPopGlobal(offset))
+        elif symbol.is_arg:
+            self.instructions.append(ir.OpStackPopArg(offset))
+        else:
+            self.instructions.append(ir.OpStackPopLocal(offset))
+
+    def emit_projection(self, total_width, offset, selected_width):
+        if total_width == selected_width and offset == 0:
+            return
+
+        suffix_width = total_width - offset - selected_width
+        if min(total_width, offset, selected_width, suffix_width) < 0:
+            raise Exception("Invalid operand-stack projection layout")
+
+        if suffix_width:
+            self.instructions.append(ir.Drop(suffix_width))
+
+        for _ in range(offset):
+            self.instructions.append(ir.Roll(selected_width))
+            self.instructions.append(ir.Drop(1))
+
+    def flatten_tuple_target(self, target):
+        flattened = []
+        for element in target.elements:
+            if isinstance(element, hr.TupleTarget):
+                flattened.extend(self.flatten_tuple_target(element))
+            else:
+                flattened.append(element)
+        return flattened
 
     def visit_BinOp(self, node):
+
+        if node.type is None or not hasattr(node, "operand_type"):
+            raise Exception("Compiler received an unresolved binary expression")
+
+        if hasattr(node, "resolved_method"):
+            operand = node.left if node.resolved_reverse else node.right
+            receiver = node.right if node.resolved_reverse else node.left
+            self.traverse(operand)
+            for _ in range(word_count(operand.type)):
+                self.instructions.append(ir.OpStackPopToCallStack())
+            self.traverse(receiver)
+            self.instructions.append(ir.OpStackPopToCallStack())
+            self.instructions.append(ir.Call(node.resolved_method))
+            return
 
         self.traverse(node.left)
         self.traverse(node.right)
 
         op = type(node.operator)
-        if op == ast.Add:
-            self.instructions.append(ir.Add())
-        elif op == ast.Mult:
-            self.instructions.append(ir.Multiply())
-        elif op == ast.Sub:
-            self.instructions.append(ir.Sub())
-        elif op == ast.Eq:
-            self.instructions.append(ir.Equal())
-        elif op == ast.NotEq:
-            self.instructions.append(ir.NotEqual())
-        elif op == ast.Lt:
-            self.instructions.append(ir.LessThan())
-        elif op == ast.Gt:
-            self.instructions.append(ir.GreaterThan())
-        elif op == ast.LtE:
-            self.instructions.append(ir.LessThanEqualTo())
-        elif op == ast.GtE:
-            self.instructions.append(ir.GreaterThanEqualTo())
-        elif op == ast.BitAnd:
-            self.instructions.append(ir.And())
-        elif op == ast.BitOr:
-            self.instructions.append(ir.Or())
-        elif op == ast.BitXor:
-            self.instructions.append(ir.Xor())
-        elif op == ast.LShift:
-            self.instructions.append(ir.ShiftLeft())
-        elif op == ast.RShift:
-            self.instructions.append(ir.ShiftRight())
-        elif op == ast.And:
-            self.instructions.append(ir.LogicalAnd)
-        elif op == ast.Or:
-            self.instructions.append(ir.LogicalOr)
+        numeric = {
+            ast.Add: ir.Add,
+            ast.Mult: ir.Multiply,
+            ast.Sub: ir.Sub,
+            ast.Lt: ir.LessThan,
+            ast.Gt: ir.GreaterThan,
+            ast.LtE: ir.LessThanEqualTo,
+            ast.GtE: ir.GreaterThanEqualTo,
+        }
+        integer = {
+            ast.BitAnd: ir.And,
+            ast.BitOr: ir.Or,
+            ast.BitXor: ir.Xor,
+            ast.LShift: ir.ShiftLeft,
+            ast.RShift: ir.ShiftRight,
+        }
+        logical = {ast.And: ir.LogicalAnd, ast.Or: ir.LogicalOr}
+        equality = {ast.Eq: ir.Equal, ast.NotEq: ir.NotEqual}
+
+        if op in numeric and node.operand_type in {INT, FLOAT, CHAR}:
+            instruction = numeric[op]
+        elif op in integer and node.operand_type == INT:
+            instruction = integer[op]
+        elif op in logical and node.operand_type == BOOL:
+            instruction = logical[op]
+        elif op in equality and node.operand_type in {INT, FLOAT, BOOL, CHAR}:
+            instruction = equality[op]
         else:
-            #todo: Add support for remaining binops
-            raise Exception(f"Bin op {op.__name__} is not supported yet")
+            raise Exception(
+                f"No VM instruction for {node.operand_type} {op.__name__} "
+                f"(line: {node.lineno})"
+            )
+
+        self.instructions.append(instruction())
 
     def visit_UnaryOp(self, node):
+
+        if node.type is None or not hasattr(node, "operand_type"):
+            raise Exception("Compiler received an unresolved unary expression")
+
+        if hasattr(node, "resolved_method"):
+            self.traverse(node.operand)
+            self.instructions.append(ir.OpStackPopToCallStack())
+            self.instructions.append(ir.Call(node.resolved_method))
+            return
 
         self.traverse(node.operand)
 
         op = type(node.operator)
-        if op == ast.Invert:
-            self.instructions.append(ir.OnesComplement())
-        elif op == ast.Not:
-            self.instructions.append(ir.LogicalNot())
-        elif op == ast.UAdd:
-            self.instructions.append(ir.UnaryPositive())
-        elif op == ast.USub:
-            self.instructions.append(ir.UnaryNegative())
-        else:
-            raise Exception(f"Invalid unary op {op.__name__}")
+        typed_operations = {
+            (ast.Invert, INT): ir.OnesComplement,
+            (ast.Not, BOOL): ir.LogicalNot,
+            (ast.UAdd, INT): ir.UnaryPositive,
+            (ast.UAdd, FLOAT): ir.UnaryPositive,
+            (ast.USub, INT): ir.UnaryNegative,
+            (ast.USub, FLOAT): ir.UnaryNegative,
+        }
+        instruction = typed_operations.get((op, node.operand_type))
+        if instruction is None:
+            raise Exception(
+                f"No VM instruction for {op.__name__} {node.operand_type} "
+                f"(line: {node.lineno})"
+            )
+        self.instructions.append(instruction())
 
 
 
-def compile(ast: hr.Module, table: Symbols, extra_instructions: dict, extra_functions: dict):
+def compile(
+    ast: hr.Module,
+    table: Symbols,
+    extra_instructions: dict | None = None,
+    extra_functions: dict | None = None,
+    instruction_set: InstructionSet | None = None,
+):
+    extra_instructions = extra_instructions or {}
+    extra_functions = extra_functions or {}
+    if instruction_set is not None:
+        for name, signature in extra_instructions.items():
+            configured = instruction_set.builtin_instructions.get(name)
+            if configured is not None and configured != signature:
+                raise ValueError(f"Built-in instruction '{name}' disagrees with the target instruction set")
+            if name in instruction_set.builtin_functions:
+                raise ValueError(f"Built-in '{name}' has conflicting calling conventions")
+        for name, signature in extra_functions.items():
+            configured = instruction_set.builtin_functions.get(name)
+            if configured is not None and configured != signature:
+                raise ValueError(f"Built-in function '{name}' disagrees with the target instruction set")
+            if name in instruction_set.builtin_instructions:
+                raise ValueError(f"Built-in '{name}' has conflicting calling conventions")
+        extra_instructions = {**instruction_set.builtin_instructions, **extra_instructions}
+        extra_functions = {**instruction_set.builtin_functions, **extra_functions}
+    builtins = {**extra_instructions, **extra_functions}
+    for name, signature in builtins.items():
+        if not isinstance(signature, BuiltinSignature):
+            raise TypeError(
+                f"Built-in instruction '{name}' must use BuiltinSignature, "
+                f"not {type(signature).__name__}"
+            )
+
+    check_types(ast, table, builtins)
+    table.calculate_layouts()
     c = _Compiler(table, extra_instructions, extra_functions)
     c.walk(ast)
 
@@ -407,4 +810,25 @@ def compile(ast: hr.Module, table: Symbols, extra_instructions: dict, extra_func
         if type(instruction) == ir.Call:
             instruction.location = c.function_locations[instruction.location]
 
-    return c.instructions
+    result = CompilationResult(list(c.instructions), c.origins)
+    if instruction_set is not None:
+        validate_instruction_set(result, instruction_set)
+    return result
+
+
+def compile_source(
+    source: str,
+    *,
+    filename: str = "<source>",
+    instruction_set: InstructionSet | None = None,
+    extra_instructions: dict | None = None,
+    extra_functions: dict | None = None,
+):
+    """Parse, analyse, compile, and target-check source with rich locations."""
+    python_ast = ast.parse(source, filename)
+    module = hr.ast_to_hr(python_ast, source=source, filename=filename)
+    table = Symbols(module)
+    return compile(
+        module, table, extra_instructions, extra_functions,
+        instruction_set=instruction_set,
+    )

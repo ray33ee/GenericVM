@@ -1,4 +1,19 @@
 import ir
+from instruction_set import CompilationResult, InstructionSet, validate_instruction_set
+
+
+INTERPRETER_INSTRUCTION_SET = InstructionSet(frozenset({
+    ir.Add, ir.And, ir.Assert, ir.Call, ir.Drop, ir.Dupe, ir.Equal, ir.Free,
+    ir.GlobalAlloc, ir.GreaterThan, ir.GreaterThanEqualTo, ir.Jump,
+    ir.JumpIfFalse, ir.JumpIfTrue, ir.LessThan, ir.LessThanEqualTo, ir.Load,
+    ir.LocalAlloc, ir.LogicalAnd, ir.LogicalNot, ir.LogicalOr, ir.Malloc,
+    ir.Multiply, ir.NotEqual, ir.OnesComplement, ir.OpStackPopArg,
+    ir.OpStackPopGlobal, ir.OpStackPopLocal, ir.OpStackPopToCallStack,
+    ir.OpStackPushArg, ir.OpStackPushGlobal, ir.OpStackPushLiteral,
+    ir.OpStackPushLocal, ir.Or, ir.PrintBool, ir.PrintChar, ir.PrintInt,
+    ir.PrintString, ir.Return, ir.Roll, ir.ShiftLeft, ir.ShiftRight, ir.Store,
+    ir.Sub, ir.UnaryNegative, ir.UnaryPositive, ir.Xor,
+}))
 
 class CallStackItem:
     def __repr__(self):
@@ -23,7 +38,17 @@ class Argument(CallStackItem):
 
 class Interpreter:
 
+    INSTRUCTION_SET = INTERPRETER_INSTRUCTION_SET
+
     def run(self, instructions: list[ir.Instruction]):
+
+        if isinstance(instructions, CompilationResult):
+            validate_instruction_set(instructions, self.INSTRUCTION_SET)
+        else:
+            validate_instruction_set(
+                CompilationResult(list(instructions), [None] * len(instructions)),
+                self.INSTRUCTION_SET,
+            )
 
         op_stack = []
         call_stack = []
@@ -94,17 +119,21 @@ class Interpreter:
             elif isinstance(op, ir.OpStackPushLiteral):
                 op_stack.append(op.value)
             elif isinstance(op, ir.BuiltInInstruction):
-                name = op.name
+                raise Exception(f"Interpreter has no implementation for external built-in '{op.name}'")
 
-                if name == "printi":
-                    print(f"Printi function: {op_stack.pop()}")
-                elif name == "prints":
-                    pointer = op_stack.pop()
-
-                    length = heap[pointer - 1]
-                    print(f"Prints function: ", end='')
-                    for i in range(length):
-                        print(chr(heap[pointer+i]), end='')
+            elif isinstance(op, ir.PrintInt):
+                print(f"{op_stack.pop()}", end='')
+            elif isinstance(op, ir.PrintString):
+                pointer = op_stack.pop()
+                length = heap[pointer - 1]
+                print(
+                    "".join(chr(heap[pointer + index]) for index in range(length)),
+                    end='',
+                )
+            elif isinstance(op, ir.PrintBool):
+                print("True" if bool(op_stack.pop()) else "False", end='')
+            elif isinstance(op, ir.PrintChar):
+                print(chr(op_stack.pop()), end='')
 
             elif isinstance(op, ir.Jump):
                 pc = op.location
@@ -130,7 +159,6 @@ class Interpreter:
                 a = op_stack.pop()
                 op_stack.append(int(a < b))
             elif isinstance(op, ir.GreaterThan):
-                print(op_stack)
                 b = op_stack.pop()
                 a = op_stack.pop()
                 op_stack.append(int(a > b))
@@ -154,9 +182,23 @@ class Interpreter:
                 b = op_stack.pop()
                 a = op_stack.pop()
                 op_stack.append(a * b)
+            elif isinstance(op, ir.LogicalAnd):
+                b = op_stack.pop()
+                a = op_stack.pop()
+                op_stack.append(int(bool(a) and bool(b)))
+            elif isinstance(op, ir.LogicalOr):
+                b = op_stack.pop()
+                a = op_stack.pop()
+                op_stack.append(int(bool(a) or bool(b)))
             elif isinstance(op, ir.UnaryNegative):
                 a = op_stack.pop()
                 op_stack.append(-a)
+            elif isinstance(op, ir.UnaryPositive):
+                a = op_stack.pop()
+                op_stack.append(+a)
+            elif isinstance(op, ir.LogicalNot):
+                a = op_stack.pop()
+                op_stack.append(int(not bool(a)))
             elif isinstance(op, ir.And):
                 b = op_stack.pop()
                 a = op_stack.pop()
@@ -203,14 +245,28 @@ class Interpreter:
 
             elif isinstance(op, ir.Dupe):
                 op_stack.append(op_stack[-1])
+            elif isinstance(op, ir.Drop):
+                if op.count < 0:
+                    raise Exception("DROP count cannot be negative")
+                if op.count > len(op_stack):
+                    raise Exception("DROP count exceeds the operand stack")
+                if op.count:
+                    del op_stack[-op.count:]
+            elif isinstance(op, ir.Roll):
+                if op.depth < 0:
+                    raise Exception("ROLL depth cannot be negative")
+                if op.depth >= len(op_stack):
+                    raise Exception("ROLL depth exceeds the operand stack")
+                value = op_stack.pop(-op.depth - 1)
+                op_stack.append(value)
+            elif isinstance(op, ir.Assert):
+                if not op_stack.pop():
+                    raise AssertionError("VM assertion failed")
 
 
             else:
                 raise Exception(f"Unknown or unhandled instruction {op}")
 
-
-
-
             pc += 1
-        print(heap)
+
         return op_stack[0] if len(op_stack) != 0 else None

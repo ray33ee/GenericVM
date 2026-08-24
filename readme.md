@@ -58,4 +58,114 @@ Equivalent to Cs ternary ? operator
 
 # Levels
 
-Some features rely on others. For example, conditional jumps require either integer or floating math to be allowed. The builder will raise an exception if an invalid configuration is specified, but once a valid specification is created the user no longer need worry about exceptions.
+Targets are described by the IR instructions they implement, not by language
+feature levels. The compiler determines the required combination from the
+program it actually lowers and reports any unavailable instructions.
+
+# Describing a target VM
+
+GenericVM checks the instructions actually emitted for a program rather than
+maintaining a separate list of language features.  This means two source
+features which lower to the same IR naturally have the same VM requirements.
+
+Use `InstructionSetBuilder` to describe a target.  Groups are convenience
+macros only: they can overlap, do not imply dependencies, and can be refined
+with individual inclusions and exclusions.
+
+```python
+import ir
+from instruction_set import InstructionGroup, InstructionSetBuilder
+
+target = (
+    InstructionSetBuilder()
+    .include_core()
+    .include_group(InstructionGroup.LOCAL_STORAGE)
+    .include_group(InstructionGroup.ARITHMETIC)
+    .include_group(InstructionGroup.BRANCHING)
+    .exclude(ir.Multiply)
+    .include(ir.PrintInt)
+    .build()
+)
+```
+
+Compile source text directly when readable diagnostics are wanted:
+
+```python
+from compiler import compile_source
+
+result = compile_source(
+    source,
+    filename="example.gvm",
+    instruction_set=target,
+)
+```
+
+The compiler first performs its normal lowering and then checks every emitted
+IR instruction against `target`.  It does not change program lowering based on
+the target.  If support is missing, one error reports all affected source
+constructs with filenames, line text, carets, and the exact missing IR classes.
+
+The lower-level API also accepts source information:
+
+```python
+import ast
+import hr
+
+module = hr.ast_to_hr(
+    ast.parse(source, "example.gvm"),
+    source=source,
+    filename="example.gvm",
+)
+```
+
+Without source text, diagnostics still contain AST line and column numbers but
+cannot display the original line.
+
+## Built-ins
+
+Register a built-in once with its calling convention, type signature, and
+opcode:
+
+```python
+from instruction_set import BuiltinDefinition, BuiltinKind
+from typesystem import BuiltinSignature, INT
+
+target = (
+    InstructionSetBuilder()
+    .include_core()
+    .include_builtin(
+        BuiltinDefinition(
+            "random",
+            BuiltinKind.FUNCTION,
+            BuiltinSignature((INT,), INT, opcode=1005),
+        )
+    )
+    .build()
+)
+```
+
+`BuiltinKind.INSTRUCTION` is for immediate, constant-argument VM operations;
+`BuiltinKind.FUNCTION` is for operand-stack-based operations.
+
+## Interpreter support and bytecode support
+
+`Interpreter.INSTRUCTION_SET` describes exactly which core IR operations the
+provided interpreter executes.  The interpreter validates a complete program
+before starting, so it cannot fail halfway through due to a missing operation.
+
+An interpreter may implement an IR operation which has no standard numeric
+opcode.  Such a target can still compile and interpret programs.  To pack that
+operation as bytecode, the VM designer must explicitly assign its opcode:
+
+```python
+target = (
+    InstructionSetBuilder()
+    .include(ir.Malloc)
+    .opcode(ir.Malloc, 170)
+    .build()
+)
+```
+
+GenericVM does not choose new opcode numbers.  Duplicate, negative, and
+non-integer opcode declarations are rejected, and bytecode generation raises
+an error instead of silently dropping an instruction with no encoding.
