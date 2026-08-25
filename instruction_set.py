@@ -68,16 +68,19 @@ class InstructionGroup:
         ir.LessThanEqualTo, ir.GreaterThanEqualTo,
     })
     ARITHMETIC = frozenset({
-        ir.Add, ir.Sub, ir.Multiply, ir.UnaryNegative, ir.UnaryPositive,
+        ir.IAdd, ir.ISub, ir.IMultiply, ir.IUnaryNegative, ir.IUnaryPositive,
+        ir.FAdd, ir.FSub, ir.FMultiply, ir.FUnaryNegative, ir.FUnaryPositive,
     })
     BITWISE = frozenset({
         ir.And, ir.Or, ir.Xor, ir.ShiftLeft, ir.ShiftRight, ir.OnesComplement,
     })
     LOGICAL = frozenset({ir.LogicalAnd, ir.LogicalOr, ir.LogicalNot})
-    CONVERSIONS = frozenset({ir.ConvertIntToFloat, ir.ConvertFloatToInt})
+    CONVERSIONS = frozenset({ir.IntToFloat, ir.ConvertFloatToInt})
     HEAP = frozenset({ir.Malloc, ir.Free, ir.Load, ir.Store})
     STACK_MANIPULATION = frozenset({ir.Dupe, ir.Drop, ir.Roll})
-    PRINTING = frozenset({ir.PrintInt, ir.PrintString, ir.PrintBool, ir.PrintChar})
+    PRINTING = frozenset({
+        ir.PrintInt, ir.PrintFloat, ir.PrintString, ir.PrintBool, ir.PrintChar,
+    })
     ASSERTIONS = frozenset({ir.Assert})
     CONDITIONAL_VALUE = frozenset({ir.Ternary})
 

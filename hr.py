@@ -279,10 +279,6 @@ class HRConstructor(ast.NodeVisitor):
         if type(operator) is ast.Is or type(operator) is ast.IsNot:
             raise Exception(f"'is' operator not allowed. (line: {node.lineno})")
 
-        if type(operator) is ast.In or type(operator) is ast.NotIn:
-            raise Exception(f"'in' operator not allowed. (line: {node.lineno})")
-
-
         return BinOp(node.lineno, self.traverse(node.left), node.ops[0], self.traverse(node.comparators[0]))
 
     def visit_Call(self, node):

@@ -6,6 +6,7 @@ from itertools import count
 import ir
 import hr
 import ast
+import string_runtime
 from instruction_set import (
     CompilationResult,
     InstructionOrigin,
@@ -44,6 +45,7 @@ class _Compiler(hr.Walker):
         #todo: Make sure there are no conflicts between built in instructions, functions and user defined functions
         self.breaks = []
         self.continues = []
+        self.string_runtime_functions = frozenset()
 
     @staticmethod
     def construct_name(node):
@@ -92,7 +94,10 @@ class _Compiler(hr.Walker):
         raise Exception(f"Node '{type(node).__name__}' not implemented for compiler")
 
     def is_name_global(self, id):
-        return id in self.table.top_level
+        return (
+            id in self.table.top_level
+            and (self.context is None or id not in self.context[0])
+        )
 
     def visit_Module(self, node):
         # Check for global variables first
@@ -107,6 +112,11 @@ class _Compiler(hr.Walker):
         self.traverse(node.methods)
 
     def visit_FunctionDef(self, node):
+        if (
+            node.name.startswith("__gvm_")
+            and node.name not in self.string_runtime_functions
+        ):
+            return
         skip = ir.Jump(None)
 
         self.instructions.append(skip)
@@ -171,7 +181,7 @@ class _Compiler(hr.Walker):
             self.traverse(node.lhs.value)
             field = self.table.classes[node.lhs.resolved_class].fields[node.lhs.attr]
             self.instructions.append(ir.OpStackPushLiteral(field.offset))
-            self.instructions.append(ir.Add())
+            self.instructions.append(ir.IAdd())
             self.traverse(node.rhs)
             self.instructions.append(ir.Store())
             return
@@ -211,12 +221,32 @@ class _Compiler(hr.Walker):
             if node.resolved_intrinsic == "len_heap":
                 self.traverse(node.args[0])
                 self.instructions.append(ir.OpStackPushLiteral(1))
-                self.instructions.append(ir.Sub())
+                self.instructions.append(ir.ISub())
                 self.instructions.append(ir.Load())
             elif node.resolved_intrinsic == "str_char":
                 self.emit_char_string(node.args[0])
+            elif node.resolved_intrinsic == "str_alloc":
+                self.traverse(node.args[0])
+                self.instructions.append(ir.OpStackPushLiteral(1))
+                self.instructions.append(ir.IAdd())
+                self.instructions.append(ir.Malloc())
+                self.instructions.append(ir.Dupe())
+                self.traverse(node.args[0])
+                self.instructions.append(ir.Store())
+                self.instructions.append(ir.OpStackPushLiteral(1))
+                self.instructions.append(ir.IAdd())
+            elif node.resolved_intrinsic == "str_set":
+                self.traverse(node.args[0])
+                self.traverse(node.args[1])
+                self.instructions.append(ir.IAdd())
+                self.traverse(node.args[2])
+                self.instructions.append(ir.Store())
             else:
                 self.traverse(node.args[0])
+        elif hasattr(node, "resolved_runtime"):
+            self.traverse(node.args[0])
+            self.instructions.append(ir.OpStackPopToCallStack())
+            self.instructions.append(ir.Call(node.resolved_runtime))
         elif hasattr(node, "resolved_builtin"):
             if node.args and isinstance(node.args[0], hr.Call) and hasattr(node.args[0], "auto_repr_class"):
                 inner = node.args[0]
@@ -298,12 +328,14 @@ class _Compiler(hr.Walker):
         self.traverse(node.value)
         field = self.table.classes[node.resolved_class].fields[node.attr]
         self.instructions.append(ir.OpStackPushLiteral(field.offset))
-        self.instructions.append(ir.Add())
+        self.instructions.append(ir.IAdd())
         self.instructions.append(ir.Load())
 
     def emit_builtin(self, name):
         if name == "printi":
             self.instructions.append(ir.PrintInt())
+        elif name == "printf":
+            self.instructions.append(ir.PrintFloat())
         elif name == "printb":
             self.instructions.append(ir.PrintBool())
         elif name == "prints":
@@ -326,11 +358,11 @@ class _Compiler(hr.Walker):
         self.instructions.append(ir.Store())
         self.instructions.append(ir.Dupe())
         self.instructions.append(ir.OpStackPushLiteral(1))
-        self.instructions.append(ir.Add())
+        self.instructions.append(ir.IAdd())
         self.traverse(character)
         self.instructions.append(ir.Store())
         self.instructions.append(ir.OpStackPushLiteral(1))
-        self.instructions.append(ir.Add())
+        self.instructions.append(ir.IAdd())
 
     def visit_JoinedStr(self, node):
         raise Exception("F-strings may only be streamed directly by print")
@@ -343,6 +375,9 @@ class _Compiler(hr.Walker):
         if value_type == INT:
             self.traverse(node.value)
             self.instructions.append(ir.PrintInt())
+        elif value_type == FLOAT:
+            self.traverse(node.value)
+            self.instructions.append(ir.PrintFloat())
         elif value_type == BOOL:
             self.traverse(node.value)
             self.instructions.append(ir.PrintBool())
@@ -379,7 +414,7 @@ class _Compiler(hr.Walker):
 
             self.instructions.append(ir.Dupe())
             self.instructions.append(ir.OpStackPushLiteral(field.offset))
-            self.instructions.append(ir.Add())
+            self.instructions.append(ir.IAdd())
             self.instructions.append(ir.Load())
             self.emit_streamed_value(field.type)
 
@@ -396,6 +431,8 @@ class _Compiler(hr.Walker):
             self.instructions.append(ir.PrintChar())
         elif value_type == INT:
             self.instructions.append(ir.PrintInt())
+        elif value_type == FLOAT:
+            self.instructions.append(ir.PrintFloat())
         elif value_type == BOOL:
             self.instructions.append(ir.PrintBool())
         elif isinstance(value_type, ClassType):
@@ -475,7 +512,7 @@ class _Compiler(hr.Walker):
         else:
             self.traverse(node.step)
 
-        self.instructions.append(ir.Add())
+        self.instructions.append(ir.IAdd())
 
         if symbol.is_arg:
             self.instructions.append(ir.OpStackPopArg(symbol.stack_offset))
@@ -564,7 +601,7 @@ class _Compiler(hr.Walker):
 
         self.traverse(node.value)
         self.traverse(node.slice)
-        self.instructions.append(ir.Add())
+        self.instructions.append(ir.IAdd())
 
         if type(node.context) is ast.Load:
             self.instructions.append(ir.Load())
@@ -583,14 +620,14 @@ class _Compiler(hr.Walker):
         for i, v in enumerate(node.elements):
             self.instructions.append(ir.Dupe())
             self.instructions.append(ir.OpStackPushLiteral(i + 1))
-            self.instructions.append(ir.Add())
+            self.instructions.append(ir.IAdd())
 
             self.traverse(v)
 
             self.instructions.append(ir.Store())
 
         self.instructions.append(ir.OpStackPushLiteral(1))
-        self.instructions.append(ir.Add())
+        self.instructions.append(ir.IAdd())
 
     def visit_Tuple(self, node):
         self.traverse(node.elements)
@@ -617,14 +654,13 @@ class _Compiler(hr.Walker):
             for i, c in enumerate(node.value):
                 self.instructions.append(ir.Dupe())
                 self.instructions.append(ir.OpStackPushLiteral(i+1))
-                self.instructions.append(ir.Add())
+                self.instructions.append(ir.IAdd())
                 self.instructions.append(ir.OpStackPushLiteral(ord(c)))
                 self.instructions.append(ir.Store())
 
             # Bit unorthodox, but the returned pointer points to the start of the list, so skip past the stored length
             self.instructions.append(ir.OpStackPushLiteral(1))
-            self.instructions.append(ir.Add())
-
+            self.instructions.append(ir.IAdd())
 
         elif node.value is not None:
             literal = (
@@ -635,9 +671,9 @@ class _Compiler(hr.Walker):
             self.instructions.append(ir.OpStackPushLiteral(literal))
 
     def name_symbol(self, identifier):
-        if self.is_name_global(identifier):
-            return self.table.top_level[identifier]
-        return self.context[0][identifier]
+        if self.context is not None and identifier in self.context[0]:
+            return self.context[0][identifier]
+        return self.table.top_level[identifier]
 
     def emit_push_symbol(self, symbol, relative_offset):
         offset = symbol.stack_offset + relative_offset
@@ -697,14 +733,73 @@ class _Compiler(hr.Walker):
             self.instructions.append(ir.Call(node.resolved_method))
             return
 
+        op = type(node.operator)
+        if op in {ast.In, ast.NotIn} and node.right_type == STR:
+            needle = node.left
+            if node.left_type == CHAR:
+                self.emit_char_string(needle)
+            else:
+                self.traverse(needle)
+            self.instructions.append(ir.OpStackPopToCallStack())
+            self.traverse(node.right)
+            self.instructions.append(ir.OpStackPopToCallStack())
+            self.instructions.append(ir.Call("__gvm_str_find"))
+            self.instructions.append(ir.OpStackPushLiteral(-1))
+            self.instructions.append((ir.NotEqual if op is ast.In else ir.Equal)())
+            return
+        if node.left_type == STR and node.right_type == STR and op in {
+            ast.Eq, ast.NotEq, ast.Lt, ast.Gt, ast.LtE, ast.GtE,
+        }:
+            for argument in (node.right, node.left):
+                self.traverse(argument)
+                self.instructions.append(ir.OpStackPopToCallStack())
+            self.instructions.append(ir.Call("__gvm_str_compare"))
+            self.instructions.append(ir.OpStackPushLiteral(0))
+            comparisons = {
+                ast.Eq: ir.Equal, ast.NotEq: ir.NotEqual,
+                ast.Lt: ir.LessThan, ast.Gt: ir.GreaterThan,
+                ast.LtE: ir.LessThanEqualTo, ast.GtE: ir.GreaterThanEqualTo,
+            }
+            self.instructions.append(comparisons[op]())
+            return
+        if node.type == STR and op in {ast.Add, ast.Mult}:
+            if op is ast.Add:
+                arguments = (node.left, node.right)
+                runtime = "__gvm_str_concat"
+            elif node.left_type == STR:
+                arguments = (node.left, node.right)
+                runtime = "__gvm_str_repeat"
+            else:
+                arguments = (node.right, node.left)
+                runtime = "__gvm_str_repeat"
+            for argument in reversed(arguments):
+                if op is ast.Add and argument.type == CHAR:
+                    self.emit_char_string(argument)
+                else:
+                    self.traverse(argument)
+                self.instructions.append(ir.OpStackPopToCallStack())
+            self.instructions.append(ir.Call(runtime))
+            return
+
         self.traverse(node.left)
+        if node.operand_type == FLOAT and node.left_type == INT:
+            self.instructions.append(ir.IntToFloat())
         self.traverse(node.right)
+        if node.operand_type == FLOAT and node.right_type == INT:
+            self.instructions.append(ir.IntToFloat())
 
         op = type(node.operator)
-        numeric = {
-            ast.Add: ir.Add,
-            ast.Mult: ir.Multiply,
-            ast.Sub: ir.Sub,
+        integer_numeric = {
+            ast.Add: ir.IAdd,
+            ast.Mult: ir.IMultiply,
+            ast.Sub: ir.ISub,
+        }
+        floating_numeric = {
+            ast.Add: ir.FAdd,
+            ast.Mult: ir.FMultiply,
+            ast.Sub: ir.FSub,
+        }
+        comparisons = {
             ast.Lt: ir.LessThan,
             ast.Gt: ir.GreaterThan,
             ast.LtE: ir.LessThanEqualTo,
@@ -720,8 +815,12 @@ class _Compiler(hr.Walker):
         logical = {ast.And: ir.LogicalAnd, ast.Or: ir.LogicalOr}
         equality = {ast.Eq: ir.Equal, ast.NotEq: ir.NotEqual}
 
-        if op in numeric and node.operand_type in {INT, FLOAT, CHAR}:
-            instruction = numeric[op]
+        if op in integer_numeric and node.operand_type == INT:
+            instruction = integer_numeric[op]
+        elif op in floating_numeric and node.operand_type == FLOAT:
+            instruction = floating_numeric[op]
+        elif op in comparisons and node.operand_type in {INT, FLOAT, CHAR}:
+            instruction = comparisons[op]
         elif op in integer and node.operand_type == INT:
             instruction = integer[op]
         elif op in logical and node.operand_type == BOOL:
@@ -753,10 +852,10 @@ class _Compiler(hr.Walker):
         typed_operations = {
             (ast.Invert, INT): ir.OnesComplement,
             (ast.Not, BOOL): ir.LogicalNot,
-            (ast.UAdd, INT): ir.UnaryPositive,
-            (ast.UAdd, FLOAT): ir.UnaryPositive,
-            (ast.USub, INT): ir.UnaryNegative,
-            (ast.USub, FLOAT): ir.UnaryNegative,
+            (ast.UAdd, INT): ir.IUnaryPositive,
+            (ast.UAdd, FLOAT): ir.FUnaryPositive,
+            (ast.USub, INT): ir.IUnaryNegative,
+            (ast.USub, FLOAT): ir.FUnaryNegative,
         }
         instruction = typed_operations.get((op, node.operand_type))
         if instruction is None:
@@ -775,6 +874,12 @@ def compile(
     extra_functions: dict | None = None,
     instruction_set: InstructionSet | None = None,
 ):
+    if not getattr(ast, "_string_runtime_added", False):
+        ast.body.extend(string_runtime.runtime_definitions())
+        ast._string_runtime_added = True
+        rebuilt = Symbols(ast)
+        table.__dict__.clear()
+        table.__dict__.update(rebuilt.__dict__)
     extra_instructions = extra_instructions or {}
     extra_functions = extra_functions or {}
     if instruction_set is not None:
@@ -803,6 +908,7 @@ def compile(
     check_types(ast, table, builtins)
     table.calculate_layouts()
     c = _Compiler(table, extra_instructions, extra_functions)
+    c.string_runtime_functions = string_runtime.required_functions(ast)
     c.walk(ast)
 
     # Loop over all calls replace the functions names with function indices

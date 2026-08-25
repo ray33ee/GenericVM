@@ -1,6 +1,7 @@
 import ast
 
 import hr
+import string_runtime
 from symbols import FieldInfo, Symbols
 from typesystem import (
     BOOL,
@@ -90,7 +91,7 @@ def check_dead_code(module: hr.Module, symbols: Symbols):
     # executable entry code, however, every function must be reachable from it.
     if roots:
         for name, function in functions.items():
-            if name not in reachable:
+            if name not in reachable and not name.startswith(string_runtime.PREFIX) and not name.startswith("__gvm_"):
                 raise DeadCodeError(
                     f"Function '{name}' is never called (line: {function.lineno})"
                 )
@@ -443,8 +444,17 @@ class SignatureInferer:
                 class_info = self.symbols.classes.get(receiver.name)
                 method = class_info.methods.get(magic) if class_info is not None and magic else None
                 return method.return_type if method is not None else None
-            if operator in {ast.Eq, ast.NotEq, ast.Lt, ast.Gt, ast.LtE, ast.GtE, ast.And, ast.Or}:
+            if operator in {
+                ast.Eq, ast.NotEq, ast.Lt, ast.Gt, ast.LtE, ast.GtE,
+                ast.And, ast.Or, ast.In, ast.NotIn,
+            }:
                 return BOOL
+            if operator is ast.Add and left in {STR, CHAR} and right in {STR, CHAR}:
+                return STR
+            if operator is ast.Mult and (
+                (left == STR and right == INT) or (left == INT and right in {STR, CHAR})
+            ):
+                return STR
             if left is None or right is None:
                 return None
             if left == FLOAT or right == FLOAT:
@@ -470,6 +480,12 @@ class SignatureInferer:
 
         if isinstance(node, hr.MethodCall):
             receiver_type = self._infer_expression(node.receiver, environment, caller)
+            if receiver_type in {STR, CHAR} and node.method in string_runtime.METHODS:
+                for argument, parameter_type in zip(
+                    node.args, string_runtime.METHODS[node.method][1]
+                ):
+                    self._infer_expression(argument, environment, caller, parameter_type)
+                return string_runtime.METHODS[node.method][2]
             if not isinstance(receiver_type, ClassType):
                 return None
             class_info = self.symbols.classes.get(receiver_type.name)
@@ -502,6 +518,8 @@ class SignatureInferer:
             return class_info.type
         if node.func not in self.functions and node.func in DUNDER_BUILTINS and len(node.args) == 1:
             receiver_type = self._infer_expression(node.args[0], environment, caller)
+            if node.func == "str" and receiver_type in {INT, FLOAT, BOOL, CHAR, STR}:
+                return STR
             if node.func == "str" and receiver_type == CHAR:
                 return STR
             if isinstance(receiver_type, ClassType):

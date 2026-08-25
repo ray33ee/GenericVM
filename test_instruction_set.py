@@ -45,9 +45,9 @@ class InstructionSetBuilderTests(unittest.TestCase):
         with self.assertRaisesRegex(InvalidInstructionSetError, "assigned to both"):
             (
                 InstructionSetBuilder()
-                .include(ir.Add, ir.Sub)
-                .opcode(ir.Add, 700)
-                .opcode(ir.Sub, 700)
+                .include(ir.IAdd, ir.ISub)
+                .opcode(ir.IAdd, 700)
+                .opcode(ir.ISub, 700)
                 .build()
             )
 
@@ -188,9 +188,9 @@ class BytecodeValidationTests(unittest.TestCase):
         self.assertEqual(bytecode([ir.Malloc()], instruction_set=target), [(170, 0)])
 
     def test_bytecode_rejects_instruction_not_supported_by_target(self):
-        target = InstructionSetBuilder().include(ir.Add).build()
-        with self.assertRaisesRegex(BytecodeEncodingError, "does not support Sub"):
-            bytecode([ir.Sub()], instruction_set=target)
+        target = InstructionSetBuilder().include(ir.IAdd).build()
+        with self.assertRaisesRegex(BytecodeEncodingError, "does not support ISub"):
+            bytecode([ir.ISub()], instruction_set=target)
 
     def test_missing_opcode_error_retains_source_line_and_construct(self):
         source = 'message = "Hello"\nmessage\n'

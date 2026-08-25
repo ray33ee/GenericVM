@@ -185,6 +185,38 @@ def invalid(flag: bool) -> int:
 
 
 class TypedCompilerTests(unittest.TestCase):
+    def test_mixed_numeric_arithmetic_promotes_int_and_uses_float_instruction(self):
+        module = hr.ast_to_hr(ast.parse("""
+main()
+
+def main() -> float:
+    integer: int = 7
+    floating: float = 0.5
+    return integer + floating
+"""))
+        instructions = compile(module, Symbols(module), {}, {})
+
+        self.assertEqual(interpreter.Interpreter().run(instructions), 7.5)
+        self.assertEqual(sum(isinstance(item, ir.IntToFloat) for item in instructions), 1)
+        self.assertEqual(sum(isinstance(item, ir.FAdd) for item in instructions), 1)
+
+    def test_arithmetic_instruction_family_is_selected_from_operand_type(self):
+        module = hr.ast_to_hr(ast.parse("""
+main()
+
+def main() -> float:
+    integer: int = 3
+    floating: float = 2.0
+    return -(integer * floating) - +1.0
+"""))
+        instructions = compile(module, Symbols(module), {}, {})
+
+        self.assertEqual(interpreter.Interpreter().run(instructions), -7.0)
+        self.assertTrue(any(isinstance(item, ir.FMultiply) for item in instructions))
+        self.assertTrue(any(isinstance(item, ir.FUnaryNegative) for item in instructions))
+        self.assertTrue(any(isinstance(item, ir.FUnaryPositive) for item in instructions))
+        self.assertTrue(any(isinstance(item, ir.FSub) for item in instructions))
+
     def test_len_of_string_and_list_loads_heap_header(self):
         module = hr.ast_to_hr(ast.parse("""
 main()
@@ -196,7 +228,7 @@ def main() -> int:
 """))
         instructions = compile(module, Symbols(module), {}, {})
         self.assertEqual(interpreter.Interpreter().run(instructions), 8)
-        self.assertEqual(sum(isinstance(item, ir.Sub) for item in instructions), 2)
+        self.assertEqual(sum(isinstance(item, ir.ISub) for item in instructions), 2)
         self.assertEqual(sum(isinstance(item, ir.Load) for item in instructions), 2)
 
     def test_compiler_runs_type_analysis_and_executes_inferred_locals(self):

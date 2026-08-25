@@ -3,16 +3,17 @@ from instruction_set import CompilationResult, InstructionSet, validate_instruct
 
 
 INTERPRETER_INSTRUCTION_SET = InstructionSet(frozenset({
-    ir.Add, ir.And, ir.Assert, ir.Call, ir.Drop, ir.Dupe, ir.Equal, ir.Free,
+    ir.IAdd, ir.And, ir.Assert, ir.Call, ir.Drop, ir.Dupe, ir.Equal, ir.Free,
+    ir.FAdd, ir.FMultiply, ir.FSub, ir.FUnaryNegative, ir.FUnaryPositive,
     ir.GlobalAlloc, ir.GreaterThan, ir.GreaterThanEqualTo, ir.Jump,
     ir.JumpIfFalse, ir.JumpIfTrue, ir.LessThan, ir.LessThanEqualTo, ir.Load,
     ir.LocalAlloc, ir.LogicalAnd, ir.LogicalNot, ir.LogicalOr, ir.Malloc,
-    ir.Multiply, ir.NotEqual, ir.OnesComplement, ir.OpStackPopArg,
+    ir.IMultiply, ir.IntToFloat, ir.NotEqual, ir.OnesComplement, ir.OpStackPopArg,
     ir.OpStackPopGlobal, ir.OpStackPopLocal, ir.OpStackPopToCallStack,
     ir.OpStackPushArg, ir.OpStackPushGlobal, ir.OpStackPushLiteral,
-    ir.OpStackPushLocal, ir.Or, ir.PrintBool, ir.PrintChar, ir.PrintInt,
+    ir.OpStackPushLocal, ir.Or, ir.PrintBool, ir.PrintChar, ir.PrintFloat, ir.PrintInt,
     ir.PrintString, ir.Return, ir.Roll, ir.ShiftLeft, ir.ShiftRight, ir.Store,
-    ir.Sub, ir.UnaryNegative, ir.UnaryPositive, ir.Xor,
+    ir.ISub, ir.IUnaryNegative, ir.IUnaryPositive, ir.Xor,
 }))
 
 class CallStackItem:
@@ -123,6 +124,8 @@ class Interpreter:
 
             elif isinstance(op, ir.PrintInt):
                 print(f"{op_stack.pop()}", end='')
+            elif isinstance(op, ir.PrintFloat):
+                print(f"{op_stack.pop()}", end='')
             elif isinstance(op, ir.PrintString):
                 pointer = op_stack.pop()
                 length = heap[pointer - 1]
@@ -170,15 +173,15 @@ class Interpreter:
                 b = op_stack.pop()
                 a = op_stack.pop()
                 op_stack.append(int(a >= b))
-            elif isinstance(op, ir.Add):
+            elif isinstance(op, (ir.IAdd, ir.FAdd)):
                 b = op_stack.pop()
                 a = op_stack.pop()
                 op_stack.append(a + b)
-            elif isinstance(op, ir.Sub):
+            elif isinstance(op, (ir.ISub, ir.FSub)):
                 b = op_stack.pop()
                 a = op_stack.pop()
                 op_stack.append(a - b)
-            elif isinstance(op, ir.Multiply):
+            elif isinstance(op, (ir.IMultiply, ir.FMultiply)):
                 b = op_stack.pop()
                 a = op_stack.pop()
                 op_stack.append(a * b)
@@ -190,12 +193,14 @@ class Interpreter:
                 b = op_stack.pop()
                 a = op_stack.pop()
                 op_stack.append(int(bool(a) or bool(b)))
-            elif isinstance(op, ir.UnaryNegative):
+            elif isinstance(op, (ir.IUnaryNegative, ir.FUnaryNegative)):
                 a = op_stack.pop()
                 op_stack.append(-a)
-            elif isinstance(op, ir.UnaryPositive):
+            elif isinstance(op, (ir.IUnaryPositive, ir.FUnaryPositive)):
                 a = op_stack.pop()
                 op_stack.append(+a)
+            elif isinstance(op, ir.IntToFloat):
+                op_stack.append(float(op_stack.pop()))
             elif isinstance(op, ir.LogicalNot):
                 a = op_stack.pop()
                 op_stack.append(int(not bool(a)))

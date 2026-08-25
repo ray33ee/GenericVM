@@ -111,7 +111,8 @@ class JumpIfFalse(Instruction):
 ###### Conversion
 
 # Pop the int on the top of the op stack, convert to float, push it back on
-class ConvertIntToFloat(Instruction):
+class IntToFloat(Instruction):
+    OPCODE = 30
     pass
 
 # Pop the float on the top of the op stack, convert to int, push it back on
@@ -216,19 +217,19 @@ class BuiltInFunction(Instruction):
 
 ###### Binary ops - Each instruction pops two values, operates on them, then pushes the result
 
-class Add(Instruction):
+class IAdd(Instruction):
 
     OPCODE = 100
 
     pass
 
-class Sub(Instruction):
+class ISub(Instruction):
 
     OPCODE = 101
 
     pass
 
-class Multiply(Instruction):
+class IMultiply(Instruction):
 
     OPCODE = 102
 
@@ -279,13 +280,13 @@ class LogicalOr(Instruction):
 
 ###### Unary ops - Each instruction pops a value, operates on it, then pushes the result
 
-class UnaryNegative(Instruction):
+class IUnaryNegative(Instruction):
 
     OPCODE = 150
 
     pass
 
-class UnaryPositive(Instruction):
+class IUnaryPositive(Instruction):
 
     OPCODE = 151
 
@@ -301,6 +302,31 @@ class LogicalNot(Instruction):
 
     OPCODE = 153
 
+    pass
+
+
+class FAdd(Instruction):
+    OPCODE = 110
+    pass
+
+
+class FSub(Instruction):
+    OPCODE = 111
+    pass
+
+
+class FMultiply(Instruction):
+    OPCODE = 112
+    pass
+
+
+class FUnaryNegative(Instruction):
+    OPCODE = 154
+    pass
+
+
+class FUnaryPositive(Instruction):
+    OPCODE = 155
     pass
 
 
@@ -326,6 +352,12 @@ class PrintChar(Instruction):
     """Print one Unicode character code."""
 
     OPCODE = 165
+
+
+class PrintFloat(Instruction):
+    """Print one floating-point value."""
+
+    OPCODE = 166
 
 ###### Ternary
 

@@ -216,7 +216,8 @@ class Symbols:
         for func in filter(lambda x : isinstance(x, hr.FunctionDef), self.module.body):
             if func.name in self.functions or func.name in self.classes or func.name in self.top_level:
                 raise Exception(f"Name '{func.name}' is already defined")
-            self.functions[func.name] = Symbols.process(func, False, top.declared).all, func
+            visible_globals = {} if func.name.startswith("__gvm_") else top.declared
+            self.functions[func.name] = Symbols.process(func, False, visible_globals).all, func
             #print(func.name + ": " + str(Symbols.process(func, False, top.declared).results()))
 
         for class_info in self.classes.values():

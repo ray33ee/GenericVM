@@ -72,6 +72,38 @@ def main():
         ]
         self.assertEqual(selected, [ir.PrintInt, ir.PrintBool, ir.PrintString, ir.PrintString])
 
+    def test_print_float_selects_print_float_and_executes(self):
+        instructions = compile_source("""
+main()
+def main():
+    print(1.25)
+    printf(2.5)
+    return
+""")
+        selected = [item for item in instructions if isinstance(item, ir.PrintFloat)]
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(bytecode([ir.PrintFloat()], {}), [(ir.PrintFloat.OPCODE, 0)])
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            interpreter.Interpreter().run(instructions)
+        self.assertEqual(output.getvalue(), "1.252.5")
+
+    def test_printed_fstring_streams_float_fragments(self):
+        instructions = compile_source("""
+main()
+def main():
+    value = 3.75
+    print(f"value={value}")
+    return
+""")
+        self.assertTrue(any(isinstance(item, ir.PrintFloat) for item in instructions))
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            interpreter.Interpreter().run(instructions)
+        self.assertEqual(output.getvalue(), "value=3.75")
+
     def test_print_streams_automatic_class_representation(self):
         instructions = compile_source("""
 class Thing:

@@ -1,6 +1,7 @@
 import ast
 
 import hr
+import string_runtime
 from symbols import FieldInfo, Symbol, Symbols
 from signature_inference import infer_function_signatures
 from typesystem import (
@@ -94,10 +95,10 @@ class TypeChecker(hr.Walker):
         return result
 
     def symbol(self, node: hr.Name) -> Symbol:
-        if node.id in self.symbols.top_level:
-            return self.symbols.top_level[node.id]
         if self.context is not None and node.id in self.context[0]:
             return self.context[0][node.id]
+        if node.id in self.symbols.top_level:
+            return self.symbols.top_level[node.id]
         self.error(node, f"Unknown variable '{node.id}'")
 
     def require(self, node, actual: Type, expected: Type, description: str):
@@ -333,6 +334,24 @@ class TypeChecker(hr.Walker):
         return self.set_type(node, result)
 
     def visit_Call(self, node, expected=None):
+        if node.func == "__gvm_str_alloc":
+            if len(node.args) != 1:
+                self.error(node, "Internal string allocation expects one argument")
+            actual = self.infer(node.args[0], INT)
+            self.require(node.args[0], actual, INT, "String allocation length")
+            node.resolved_intrinsic = "str_alloc"
+            node.expanded_argument_count = 1
+            return self.set_type(node, STR)
+        if node.func == "__gvm_str_set":
+            required = (STR, INT, CHAR)
+            if len(node.args) != 3:
+                self.error(node, "Internal string store expects three arguments")
+            for argument, expected_type in zip(node.args, required):
+                actual = self.infer(argument, expected_type)
+                self.require(argument, actual, expected_type, "Invalid internal string store argument")
+            node.resolved_intrinsic = "str_set"
+            node.expanded_argument_count = 3
+            return self.set_type(node, NONE)
         if node.func == "len" and len(node.args) == 1 and not isinstance(node.args[0], hr.Starred):
             value_type = self.infer(node.args[0])
             if value_type == STR or isinstance(value_type, ListType):
@@ -349,12 +368,14 @@ class TypeChecker(hr.Walker):
             node.resolved_intrinsic = node.func
             node.expanded_argument_count = 1
             return self.set_type(node, result)
-        if node.func in {"printi", "prints", "printb", "printc"}:
+        if node.func in {"printi", "printf", "prints", "printb", "printc"}:
             if len(node.args) != 1:
                 self.error(node, f"{node.func} expects exactly one argument")
             argument_type = self.infer(node.args[0], STR if node.func == "prints" else None)
             if node.func == "printi" and argument_type != INT:
                 self.error(node.args[0], f"printi expects int, found {argument_type}")
+            if node.func == "printf" and argument_type != FLOAT:
+                self.error(node.args[0], f"printf expects float, found {argument_type}")
             if node.func == "prints" and argument_type != STR:
                 self.error(node.args[0], f"prints expects str, found {argument_type}")
             if node.func == "printc" and argument_type != CHAR:
@@ -381,6 +402,8 @@ class TypeChecker(hr.Walker):
                     self.allow_auto_string = previous_auto
                 if argument_type == INT:
                     target = "printi"
+                elif argument_type == FLOAT:
+                    target = "printf"
                 elif argument_type == BOOL:
                     target = "printb"
                 elif argument_type == CHAR:
@@ -407,6 +430,18 @@ class TypeChecker(hr.Walker):
             signature = self.function_types[node.func]
         elif node.func in DUNDER_BUILTINS and len(node.args) == 1 and not isinstance(node.args[0], hr.Starred):
             receiver_type = self.infer(node.args[0])
+            if node.func == "str" and receiver_type in {STR, BOOL, INT, FLOAT}:
+                node.expanded_argument_count = 1
+                if receiver_type == STR:
+                    node.resolved_intrinsic = "identity"
+                else:
+                    if receiver_type == BOOL:
+                        node.resolved_runtime = "__gvm_str_bool"
+                    elif receiver_type == INT:
+                        node.resolved_runtime = "__gvm_str_int"
+                    else:
+                        node.resolved_runtime = "__gvm_str_float"
+                return self.set_type(node, STR)
             if isinstance(receiver_type, ClassType):
                 dunder, required_return = DUNDER_BUILTINS[node.func]
                 class_info = self.symbols.classes[receiver_type.name]
@@ -518,15 +553,12 @@ class TypeChecker(hr.Walker):
         value_type = self.infer(node.value)
         if value_type == INT:
             node.resolved_builtin = "printi"
+        elif value_type == FLOAT:
+            node.resolved_builtin = "printf"
         elif value_type == BOOL:
             node.resolved_builtin = "printb"
         elif value_type == CHAR:
             node.resolved_builtin = "printc"
-        elif value_type == FLOAT:
-            if self.allow_joined_str:
-                self.error(node.value, "Direct f-string printing does not support float")
-            node.scalar_string_type = FLOAT
-            node.resolved_builtin = "prints"
         elif value_type == STR:
             node.resolved_builtin = "prints"
         elif isinstance(value_type, ClassType):
@@ -548,7 +580,7 @@ class TypeChecker(hr.Walker):
             return
         visiting.add(class_type.name)
         for field in self.symbols.classes[class_type.name].fields.values():
-            if field.type in {INT, BOOL, STR, CHAR}:
+            if field.type in {INT, FLOAT, BOOL, STR, CHAR}:
                 continue
             if isinstance(field.type, ClassType):
                 self._validate_auto_string_fields(node, field.type, visiting)
@@ -568,6 +600,20 @@ class TypeChecker(hr.Walker):
 
     def visit_MethodCall(self, node, expected=None):
         receiver_type = self.infer(node.receiver)
+        if receiver_type == CHAR and isinstance(node.receiver, hr.Constant):
+            receiver_type = self.infer(node.receiver, STR)
+        if receiver_type == STR:
+            definition = string_runtime.METHODS.get(node.method)
+            if definition is None:
+                self.error(node, f"String has no method '{node.method}'")
+            _, parameter_types, return_type = definition
+            if len(node.args) != len(parameter_types):
+                self.error(node, f"str.{node.method} expects {len(parameter_types)} arguments")
+            for argument, parameter_type in zip(node.args, parameter_types):
+                actual = self.infer(argument, parameter_type)
+                self.require(argument, actual, parameter_type, f"Invalid argument to str.{node.method}")
+            node.resolved_method = string_runtime.runtime_name(node.method)
+            return self.set_type(node, return_type)
         if not isinstance(receiver_type, ClassType):
             self.error(node, f"Type {receiver_type} has no methods")
         class_info = self.symbols.classes.get(receiver_type.name)
@@ -590,6 +636,11 @@ class TypeChecker(hr.Walker):
         left_type = self.infer(node.left)
         right_type = self.infer(node.right, left_type)
         operator = type(node.operator)
+        if (
+            operator is ast.Mult and left_type == INT and right_type == CHAR
+            and isinstance(node.right, hr.Constant)
+        ):
+            right_type = self.infer(node.right, STR)
 
         magic_methods = {
             ast.Add: ("__add__", "__radd__"), ast.Sub: ("__sub__", "__rsub__"),
@@ -624,19 +675,36 @@ class TypeChecker(hr.Walker):
         equality = {ast.Eq, ast.NotEq}
         bitwise = {ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift}
         logical = {ast.And, ast.Or}
+        membership = {ast.In, ast.NotIn}
 
         if operator in arithmetic:
-            if left_type not in {INT, FLOAT} or right_type != left_type:
-                self.error(node, f"Operator {operator.__name__} requires matching numeric operands")
-            result = left_type
+            if (
+                operator is ast.Add
+                and left_type in {STR, CHAR}
+                and right_type in {STR, CHAR}
+            ):
+                result = STR
+            elif operator is ast.Mult and (
+                (left_type == STR and right_type == INT)
+                or (left_type == INT and right_type == STR)
+            ):
+                result = STR
+            elif left_type not in {INT, FLOAT} or right_type not in {INT, FLOAT}:
+                # Add will also gain a separate string-concatenation branch later.
+                self.error(node, f"Operator {operator.__name__} requires numeric operands")
+            else:
+                result = FLOAT if FLOAT in {left_type, right_type} else INT
         elif operator in ordering:
-            if left_type not in {INT, FLOAT, CHAR} or right_type != left_type:
+            if left_type == STR and right_type == STR:
+                result = BOOL
+            elif left_type not in {INT, FLOAT, CHAR} or right_type != left_type:
                 self.error(node, f"Operator {operator.__name__} requires matching numeric operands")
-            result = BOOL
+            else:
+                result = BOOL
         elif operator in equality:
             if right_type != left_type:
                 self.error(node, f"Operator {operator.__name__} requires matching operand types")
-            if left_type not in {INT, FLOAT, BOOL, CHAR}:
+            if left_type not in {INT, FLOAT, BOOL, CHAR, STR}:
                 self.error(node, f"Equality is not implemented for {left_type}")
             result = BOOL
         elif operator in bitwise:
@@ -647,10 +715,16 @@ class TypeChecker(hr.Walker):
             if left_type != BOOL or right_type != BOOL:
                 self.error(node, f"Operator {operator.__name__} requires bool operands")
             result = BOOL
+        elif operator in membership:
+            if left_type not in {STR, CHAR} or right_type != STR:
+                self.error(node, "String membership requires a char or str on the left and str on the right")
+            result = BOOL
         else:
             self.error(node, f"Operator {operator.__name__} is not supported")
 
-        node.operand_type = left_type
+        node.left_type = left_type
+        node.right_type = right_type
+        node.operand_type = result if operator in arithmetic else left_type
         return self.set_type(node, result)
 
     def visit_UnaryOp(self, node, expected=None):
