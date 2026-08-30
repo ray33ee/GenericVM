@@ -15,7 +15,7 @@ from instruction_set import (
 )
 from symbols import Symbols
 from typecheck import check_types
-from typesystem import BOOL, CHAR, FLOAT, INT, NONE, STR, BuiltinSignature, ClassType, TupleType, word_count
+from typesystem import BOOL, CHAR, FLOAT, INT, NONE, PTR, STR, BuiltinSignature, ClassType, TupleType, word_count
 
 class _InstructionBuffer(list):
     """A list-compatible IR sink which records origin metadata on append."""
@@ -218,7 +218,15 @@ class _Compiler(hr.Walker):
             self.instructions.append(ir.Call(node.streamed_method))
             self.instructions.append(ir.PrintString())
         elif hasattr(node, "resolved_intrinsic"):
-            if node.resolved_intrinsic == "input":
+            if node.resolved_intrinsic in {"cast_str", "cast_int", "cast_ptr"}:
+                self.traverse(node.args[0])
+            elif node.resolved_intrinsic == "malloc":
+                self.traverse(node.args[0])
+                self.instructions.append(ir.Malloc())
+            elif node.resolved_intrinsic == "free":
+                self.traverse(node.args[0])
+                self.instructions.append(ir.Free())
+            elif node.resolved_intrinsic == "input":
                 self.traverse(node.args[0])
                 self.instructions.append(ir.Dupe())
                 self.instructions.append(ir.OpStackPushLiteral(1))
@@ -793,10 +801,10 @@ class _Compiler(hr.Walker):
             return
 
         self.traverse(node.left)
-        if node.operand_type == FLOAT and node.left_type == INT:
+        if node.operand_type == FLOAT and node.left_type in {INT, BOOL}:
             self.instructions.append(ir.IntToFloat())
         self.traverse(node.right)
-        if node.operand_type == FLOAT and node.right_type == INT:
+        if node.operand_type == FLOAT and node.right_type in {INT, BOOL}:
             self.instructions.append(ir.IntToFloat())
 
         op = type(node.operator)
@@ -826,7 +834,7 @@ class _Compiler(hr.Walker):
         logical = {ast.And: ir.LogicalAnd, ast.Or: ir.LogicalOr}
         equality = {ast.Eq: ir.Equal, ast.NotEq: ir.NotEqual}
 
-        if op in integer_numeric and node.operand_type == INT:
+        if op in integer_numeric and node.operand_type in {INT, PTR}:
             instruction = integer_numeric[op]
         elif op in floating_numeric and node.operand_type == FLOAT:
             instruction = floating_numeric[op]

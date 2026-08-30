@@ -62,7 +62,11 @@ class Interpreter:
 
         malloc_index = 0
 
+        counter = 0
+
         while True:
+
+            counter += 1
 
             if pc >= len(instructions):
                 break
@@ -248,7 +252,7 @@ class Interpreter:
 
                 malloc_index += size
             elif isinstance(op, ir.Free):
-                pass
+                op_stack.pop()
             elif isinstance(op, ir.Store):
                 value = op_stack.pop()
                 index = op_stack.pop()
@@ -287,5 +291,7 @@ class Interpreter:
                 raise Exception(f"Unknown or unhandled instruction {op}")
 
             pc += 1
+
+        print(f"Executed {counter} instructions")
 
         return op_stack[0] if len(op_stack) != 0 else None

@@ -155,6 +155,31 @@ before the characters. The compiler preserves a separate copy of the allocated
 string pointer because the native instruction consumes both operands and does
 not push a result.
 
+The low-level memory intrinsics `malloc(size)` and `free(location)` lower
+directly to the native `Malloc` and `Free` instructions. `malloc` returns a
+`ptr`; `free` consumes a `ptr` and returns `None`. Pointer indexing is raw
+word access, so `p[index]` loads an integer and `p[index] = value` stores one.
+Pointer arithmetic is word-based: `ptr + int`, `int + ptr`, and `ptr - int`
+produce pointers, while subtracting two pointers produces their integer word
+distance.
+
+`cast_str(location)` is a compiler-only pointer cast from `ptr` to `str`. It
+emits no conversion instruction and performs no validation or allocation; the
+integer must already point to the first character of a valid GenericVM string,
+with its length stored at `location - 1`.
+
+`cast_int(text)` exposes a string pointer as an `int` without emitting a VM
+instruction.
+
+`cast_ptr(text)` casts a `str` back to its underlying `ptr`, also without
+emitting a VM instruction. Together, `cast_str(ptr)` and `cast_ptr(str)` are
+the direct pointer/string casts.
+
+`bool` is implicitly usable wherever an `int` is expected. Mixed integer and
+boolean arithmetic and bitwise operations produce `int`; no conversion
+instruction is emitted. This conversion is one-way, so an arbitrary `int`
+cannot be used where `bool` is required.
+
 ## Interpreter support and bytecode support
 
 `Interpreter.INSTRUCTION_SET` describes exactly which core IR operations the

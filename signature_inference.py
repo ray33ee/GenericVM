@@ -9,6 +9,7 @@ from typesystem import (
     FLOAT,
     INT,
     NONE,
+    PTR,
     STR,
     BuiltinSignature,
     ClassType,
@@ -451,14 +452,26 @@ class SignatureInferer:
                 return BOOL
             if operator is ast.Add and left in {STR, CHAR} and right in {STR, CHAR}:
                 return STR
+            if operator is ast.Add and (
+                (left == PTR and right in {INT, BOOL})
+                or (left in {INT, BOOL} and right == PTR)
+            ):
+                return PTR
+            if operator is ast.Sub and left == PTR and right in {INT, BOOL}:
+                return PTR
+            if operator is ast.Sub and left == PTR and right == PTR:
+                return INT
             if operator is ast.Mult and (
-                (left == STR and right == INT) or (left == INT and right in {STR, CHAR})
+                (left == STR and right in {INT, BOOL})
+                or (left in {INT, BOOL} and right in {STR, CHAR})
             ):
                 return STR
             if left is None or right is None:
                 return None
             if left == FLOAT or right == FLOAT:
-                return FLOAT if left in {INT, FLOAT} and right in {INT, FLOAT} else None
+                return FLOAT if left in {INT, BOOL, FLOAT} and right in {INT, BOOL, FLOAT} else None
+            if left in {INT, BOOL} and right in {INT, BOOL}:
+                return INT
             return left if left == right else None
 
         if isinstance(node, hr.IfExpr):
@@ -498,6 +511,14 @@ class SignatureInferer:
         return None
 
     def _infer_call(self, node, environment, caller):
+        if node.func in {"cast_str", "cast_int", "cast_ptr"} and len(node.args) == 1:
+            source_type = PTR if node.func == "cast_str" else STR
+            self._infer_expression(node.args[0], environment, caller, source_type)
+            return {"cast_str": STR, "cast_int": INT, "cast_ptr": PTR}[node.func]
+        if node.func in {"malloc", "free"} and len(node.args) == 1:
+            argument_type = INT if node.func == "malloc" else PTR
+            self._infer_expression(node.args[0], environment, caller, argument_type)
+            return PTR if node.func == "malloc" else NONE
         if node.func == "input" and len(node.args) == 1:
             self._infer_expression(node.args[0], environment, caller, INT)
             return STR
@@ -698,6 +719,12 @@ class SignatureInferer:
             not self.explicit_parameters[(function.name, index)]
             and argument.annotation != actual_type
         ):
+            if {argument.annotation, actual_type} == {INT, BOOL}:
+                argument.annotation = INT
+                symbol = self.symbols.functions[function.name][0][argument.name]
+                symbol.type = INT
+                self.changed = True
+                return
             raise SignatureInferenceError(
                 f"Conflicting {'external' if external else 'recursive'} calls for parameter "
                 f"'{argument.name}' of "
@@ -720,6 +747,8 @@ class SignatureInferer:
             return left
         if {left, right} == {INT, FLOAT}:
             return FLOAT
+        if {left, right} == {INT, BOOL}:
+            return INT
         raise SignatureInferenceError(
             f"Function '{function.name}' has incompatible inferred return types "
             f"{left} and {right} (line: {function.lineno})"

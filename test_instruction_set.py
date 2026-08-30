@@ -19,6 +19,7 @@ from instruction_set import (
     UnsupportedInstructionError,
 )
 from typesystem import BuiltinSignature, INT
+from typecheck import TypeCheckError
 
 
 class InstructionSetBuilderTests(unittest.TestCase):
@@ -50,6 +51,105 @@ class InstructionSetBuilderTests(unittest.TestCase):
         with patch("builtins.input", return_value="hello"), redirect_stdout(output):
             interpreter.Interpreter().run(result)
         self.assertEqual(output.getvalue(), "hel")
+
+    def test_malloc_and_free_intrinsics_lower_directly(self):
+        target = interpreter.Interpreter.INSTRUCTION_SET
+        result = compile_source(
+            "location: ptr = malloc(4)\nfree(location)\n",
+            instruction_set=target,
+        )
+
+        memory_operations = [
+            type(item) for item in result
+            if isinstance(item, (ir.Malloc, ir.Free))
+        ]
+        self.assertEqual(memory_operations, [ir.Malloc, ir.Free])
+        self.assertIn((1006, 0), bytecode(result, instruction_set=target))
+        self.assertIn((1007, 0), bytecode(result, instruction_set=target))
+        self.assertIsNone(interpreter.Interpreter().run(result))
+
+    def test_pointer_indexing_loads_and_stores_raw_words(self):
+        target = interpreter.Interpreter.INSTRUCTION_SET
+        result = compile_source(
+            "main()\n\ndef main():\n    p = malloc(1)\n    p[0] = 5\n    print(p[0])\n    free(p)\n",
+            instruction_set=target,
+        )
+
+        output = StringIO()
+        with redirect_stdout(output):
+            interpreter.Interpreter().run(result)
+        self.assertEqual(output.getvalue(), "5")
+
+    def test_pointer_arithmetic_uses_word_offsets(self):
+        target = interpreter.Interpreter.INSTRUCTION_SET
+        result = compile_source(
+            "main()\n\ndef main():\n    p = malloc(4)\n    q = p + 2\n    q[0] = 9\n    print(q - p)\n    print((1 + p)[1])\n    free(q - 2)\n",
+            instruction_set=target,
+        )
+
+        output = StringIO()
+        with redirect_stdout(output):
+            interpreter.Interpreter().run(result)
+        self.assertEqual(output.getvalue(), "29")
+
+    def test_bool_is_implicitly_usable_as_int(self):
+        target = interpreter.Interpreter.INSTRUCTION_SET
+        result = compile_source(
+            "main()\n\ndef add_one(value: int) -> int:\n    return value + 1\n\ndef main():\n    number: int = True\n    p = malloc(2)\n    (p + True)[0] = 7\n    print(number + 2)\n    print(add_one(False))\n    print(p[1])\n    print(True + 0.5)\n    free(p)\n",
+            instruction_set=target,
+        )
+
+        output = StringIO()
+        with redirect_stdout(output):
+            interpreter.Interpreter().run(result)
+        self.assertEqual(output.getvalue(), "3171.5")
+
+    def test_int_is_not_implicitly_usable_as_bool(self):
+        with self.assertRaises(TypeCheckError):
+            compile_source("flag: bool = 2\nprint(flag)\n")
+
+    def test_string_and_pointer_casts_are_instruction_free(self):
+        target = interpreter.Interpreter.INSTRUCTION_SET
+        result = compile_source(
+            "main()\n\ndef main():\n    text: str = \"ok\"\n    p: ptr = cast_ptr(text)\n    same_text: str = cast_str(p)\n    print(same_text)\n",
+            instruction_set=target,
+        )
+
+        self.assertFalse(any(type(item).__name__.startswith("Cast") for item in result))
+        output = StringIO()
+        with redirect_stdout(output):
+            interpreter.Interpreter().run(result)
+        self.assertEqual(output.getvalue(), "ok")
+
+    def test_cast_str_changes_only_the_compiler_type(self):
+        target = interpreter.Interpreter.INSTRUCTION_SET
+        result = compile_source(
+            "main()\n\ndef main():\n    location: ptr = malloc(10)\n    text: str = cast_str(location)\n    print(text)\n",
+            instruction_set=target,
+        )
+
+        operations = list(result)
+        push_location = next(
+            index for index, item in enumerate(operations)
+            if isinstance(item, ir.OpStackPushLocal)
+        )
+        self.assertIsInstance(operations[push_location + 1], ir.OpStackPopLocal)
+        self.assertFalse(any(type(item).__name__.startswith("Cast") for item in operations))
+
+    def test_cast_int_returns_the_unchanged_string_pointer(self):
+        target = interpreter.Interpreter.INSTRUCTION_SET
+        result = compile_source(
+            "main()\n\ndef main():\n    text: str = \"x\"\n    location: int = cast_int(text)\n    print(location)\n",
+            instruction_set=target,
+        )
+
+        operations = list(result)
+        push_text = next(
+            index for index, item in enumerate(operations)
+            if isinstance(item, ir.OpStackPushLocal)
+        )
+        self.assertIsInstance(operations[push_text + 1], ir.OpStackPopLocal)
+        self.assertFalse(any(type(item).__name__.startswith("Cast") for item in operations))
 
     def test_complete_set_can_be_built(self):
         target = InstructionSetBuilder().include_all().build()

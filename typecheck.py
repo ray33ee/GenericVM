@@ -10,6 +10,7 @@ from typesystem import (
     FLOAT,
     INT,
     NONE,
+    PTR,
     STR,
     BuiltinSignature,
     ClassType,
@@ -102,7 +103,7 @@ class TypeChecker(hr.Walker):
         self.error(node, f"Unknown variable '{node.id}'")
 
     def require(self, node, actual: Type, expected: Type, description: str):
-        if actual != expected:
+        if actual != expected and not (actual == BOOL and expected == INT):
             self.error(node, f"{description}: expected {expected}, found {actual}")
 
     def infer(self, node: hr.Expression, expected: Type | None = None) -> Type:
@@ -314,6 +315,8 @@ class TypeChecker(hr.Walker):
             result = container_type.element_type
         elif container_type == STR:
             result = CHAR
+        elif container_type == PTR:
+            result = INT
         elif isinstance(container_type, TupleType):
             index = self._integer_literal(node.slice)
             if index is None:
@@ -334,6 +337,25 @@ class TypeChecker(hr.Walker):
         return self.set_type(node, result)
 
     def visit_Call(self, node, expected=None):
+        if node.func in {"cast_str", "cast_int", "cast_ptr"}:
+            if len(node.args) != 1:
+                self.error(node, f"{node.func} expects exactly one argument")
+            source_type = PTR if node.func == "cast_str" else STR
+            result_type = {"cast_str": STR, "cast_int": INT, "cast_ptr": PTR}[node.func]
+            actual = self.infer(node.args[0], source_type)
+            self.require(node.args[0], actual, source_type, f"{node.func} argument must be {source_type}")
+            node.resolved_intrinsic = node.func
+            node.expanded_argument_count = 1
+            return self.set_type(node, result_type)
+        if node.func in {"malloc", "free"}:
+            if len(node.args) != 1:
+                self.error(node, f"{node.func} expects exactly one integer argument")
+            argument_type = INT if node.func == "malloc" else PTR
+            actual = self.infer(node.args[0], argument_type)
+            self.require(node.args[0], actual, argument_type, f"{node.func} argument must be {argument_type}")
+            node.resolved_intrinsic = node.func
+            node.expanded_argument_count = 1
+            return self.set_type(node, PTR if node.func == "malloc" else NONE)
         if node.func == "input":
             if len(node.args) != 1:
                 self.error(node, "input expects exactly one maximum-length argument")
@@ -692,12 +714,21 @@ class TypeChecker(hr.Walker):
                 and right_type in {STR, CHAR}
             ):
                 result = STR
+            elif operator is ast.Add and (
+                (left_type == PTR and right_type in {INT, BOOL})
+                or (left_type in {INT, BOOL} and right_type == PTR)
+            ):
+                result = PTR
+            elif operator is ast.Sub and left_type == PTR and right_type in {INT, BOOL}:
+                result = PTR
+            elif operator is ast.Sub and left_type == PTR and right_type == PTR:
+                result = INT
             elif operator is ast.Mult and (
-                (left_type == STR and right_type == INT)
-                or (left_type == INT and right_type == STR)
+                (left_type == STR and right_type in {INT, BOOL})
+                or (left_type in {INT, BOOL} and right_type == STR)
             ):
                 result = STR
-            elif left_type not in {INT, FLOAT} or right_type not in {INT, FLOAT}:
+            elif left_type not in {INT, BOOL, FLOAT} or right_type not in {INT, BOOL, FLOAT}:
                 # Add will also gain a separate string-concatenation branch later.
                 self.error(node, f"Operator {operator.__name__} requires numeric operands")
             else:
@@ -705,18 +736,21 @@ class TypeChecker(hr.Walker):
         elif operator in ordering:
             if left_type == STR and right_type == STR:
                 result = BOOL
-            elif left_type not in {INT, FLOAT, CHAR} or right_type != left_type:
+            elif (
+                left_type not in {INT, BOOL, FLOAT, CHAR}
+                or (INT if right_type == BOOL else right_type) != (INT if left_type == BOOL else left_type)
+            ):
                 self.error(node, f"Operator {operator.__name__} requires matching numeric operands")
             else:
                 result = BOOL
         elif operator in equality:
-            if right_type != left_type:
+            if right_type != left_type and {left_type, right_type} != {INT, BOOL}:
                 self.error(node, f"Operator {operator.__name__} requires matching operand types")
             if left_type not in {INT, FLOAT, BOOL, CHAR, STR}:
                 self.error(node, f"Equality is not implemented for {left_type}")
             result = BOOL
         elif operator in bitwise:
-            if left_type != INT or right_type != INT:
+            if left_type not in {INT, BOOL} or right_type not in {INT, BOOL}:
                 self.error(node, f"Operator {operator.__name__} requires int operands")
             result = INT
         elif operator in logical:

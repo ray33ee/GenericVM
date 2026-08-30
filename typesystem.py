@@ -74,6 +74,7 @@ FLOAT = PrimitiveType("float")
 BOOL = PrimitiveType("bool")
 STR = PrimitiveType("str")
 CHAR = PrimitiveType("char")
+PTR = PrimitiveType("ptr")
 NONE = PrimitiveType("NoneType")
 
 # One-argument Python protocol conveniences. A None result means the dunder's
@@ -98,7 +99,7 @@ LIST = PrimitiveType("list")
 
 PRIMITIVE_TYPES = {
     primitive.name: primitive
-    for primitive in (INT, FLOAT, BOOL, STR, CHAR, NONE, LIST)
+    for primitive in (INT, FLOAT, BOOL, STR, CHAR, PTR, NONE, LIST)
 }
 
 
