@@ -218,7 +218,18 @@ class _Compiler(hr.Walker):
             self.instructions.append(ir.Call(node.streamed_method))
             self.instructions.append(ir.PrintString())
         elif hasattr(node, "resolved_intrinsic"):
-            if node.resolved_intrinsic == "len_heap":
+            if node.resolved_intrinsic == "input":
+                self.traverse(node.args[0])
+                self.instructions.append(ir.Dupe())
+                self.instructions.append(ir.OpStackPushLiteral(1))
+                self.instructions.append(ir.IAdd())
+                self.instructions.append(ir.Malloc())
+                self.instructions.append(ir.OpStackPushLiteral(1))
+                self.instructions.append(ir.IAdd())
+                self.instructions.append(ir.Dupe())
+                self.instructions.append(ir.Roll(2))
+                self.instructions.append(ir.Input())
+            elif node.resolved_intrinsic == "len_heap":
                 self.traverse(node.args[0])
                 self.instructions.append(ir.OpStackPushLiteral(1))
                 self.instructions.append(ir.ISub())

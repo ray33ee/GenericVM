@@ -334,6 +334,14 @@ class TypeChecker(hr.Walker):
         return self.set_type(node, result)
 
     def visit_Call(self, node, expected=None):
+        if node.func == "input":
+            if len(node.args) != 1:
+                self.error(node, "input expects exactly one maximum-length argument")
+            actual = self.infer(node.args[0], INT)
+            self.require(node.args[0], actual, INT, "input maximum length must be int")
+            node.resolved_intrinsic = "input"
+            node.expanded_argument_count = 1
+            return self.set_type(node, STR)
         if node.func == "__gvm_str_alloc":
             if len(node.args) != 1:
                 self.error(node, "Internal string allocation expects one argument")

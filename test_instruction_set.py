@@ -1,5 +1,9 @@
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+from unittest.mock import patch
 
+import hr
 import ir
 import interpreter
 from bytecode import BytecodeEncodingError, bytecode
@@ -28,18 +32,37 @@ class InstructionSetBuilderTests(unittest.TestCase):
         self.assertIn(ir.And, target.instructions)
         self.assertNotIn(ir.Xor, target.instructions)
 
+    def test_input_intrinsic_allocates_then_uses_native_instruction(self):
+        target = interpreter.Interpreter.INSTRUCTION_SET
+        self.assertNotIn("input", target.builtin_instructions)
+        self.assertNotIn("input", target.builtin_functions)
+
+        result = compile_source(
+            "value: str = input(3)\nprint(value)\n",
+            instruction_set=target,
+        )
+        self.assertTrue(any(isinstance(item, ir.Malloc) for item in result))
+        self.assertTrue(any(isinstance(item, ir.Input) for item in result))
+        self.assertEqual(sum(isinstance(item, ir.Roll) for item in result), 1)
+        self.assertFalse(any(isinstance(item, ir.BuiltInFunction) for item in result))
+        self.assertIn((1005, 0), bytecode(result, instruction_set=target))
+        output = StringIO()
+        with patch("builtins.input", return_value="hello"), redirect_stdout(output):
+            interpreter.Interpreter().run(result)
+        self.assertEqual(output.getvalue(), "hel")
+
     def test_complete_set_can_be_built(self):
         target = InstructionSetBuilder().include_all().build()
         self.assertIn(ir.Malloc, target.instructions)
         self.assertIn(ir.Call, target.instructions)
 
     def test_builtin_definition_unifies_signature_kind_and_opcode(self):
-        signature = BuiltinSignature((INT,), INT, 1005)
+        signature = BuiltinSignature((INT,), INT, 1010)
         target = InstructionSetBuilder().include_builtin(
             BuiltinDefinition("random", BuiltinKind.FUNCTION, signature)
         ).build()
         self.assertEqual(target.builtin_functions["random"], signature)
-        self.assertEqual(target.builtins["random"].opcode, 1005)
+        self.assertEqual(target.builtins["random"].opcode, 1010)
 
     def test_opcode_collisions_are_rejected(self):
         with self.assertRaisesRegex(InvalidInstructionSetError, "assigned to both"):
@@ -126,7 +149,7 @@ result
         self.assertIn("function call", str(raised.exception))
 
     def test_named_builtin_must_be_in_target(self):
-        signature = BuiltinSignature((INT,), INT, 1005)
+        signature = BuiltinSignature((INT,), INT, 1010)
         permissive = InstructionSetBuilder().include_all().build()
         with self.assertRaises(UnsupportedInstructionError) as raised:
             compile_source(
@@ -137,7 +160,7 @@ result
         self.assertIn("BuiltInFunction(random)", str(raised.exception))
 
     def test_target_registered_builtin_is_used_for_typechecking_and_validation(self):
-        signature = BuiltinSignature((INT,), INT, 1005)
+        signature = BuiltinSignature((INT,), INT, 1010)
         target = (
             InstructionSetBuilder()
             .include_all()
@@ -154,14 +177,14 @@ result
         target = (
             InstructionSetBuilder()
             .include_all()
-            .include_builtin_function("random", BuiltinSignature((INT,), INT, 1005))
+            .include_builtin_function("random", BuiltinSignature((INT,), INT, 1010))
             .build()
         )
         with self.assertRaisesRegex(ValueError, "disagrees"):
             compile_source(
                 "result = random(4)\nresult\n",
                 instruction_set=target,
-                extra_functions={"random": BuiltinSignature((INT,), INT, 1006)},
+                extra_functions={"random": BuiltinSignature((INT,), INT, 1011)},
             )
 
     def test_interpreter_rejects_unsupported_program_before_execution(self):
@@ -174,11 +197,13 @@ result
 
 
 class BytecodeValidationTests(unittest.TestCase):
-    def test_opcode_less_instruction_is_not_silently_ignored(self):
-        with self.assertRaisesRegex(BytecodeEncodingError, "Malloc has no opcode"):
-            bytecode([ir.Malloc()])
+    def test_heap_and_dupe_instructions_use_stable_opcodes(self):
+        self.assertEqual(
+            bytecode([ir.Load(), ir.Store(), ir.Input(), ir.Malloc(), ir.Free(), ir.Dupe()]),
+            [(1003, 0), (1004, 0), (1005, 0), (1006, 0), (1007, 0), (200, 0)],
+        )
 
-    def test_explicit_target_opcode_encodes_opcode_less_instruction(self):
+    def test_explicit_target_opcode_overrides_standard_instruction_opcode(self):
         target = (
             InstructionSetBuilder()
             .include(ir.Malloc)
@@ -193,21 +218,20 @@ class BytecodeValidationTests(unittest.TestCase):
             bytecode([ir.ISub()], instruction_set=target)
 
     def test_missing_opcode_error_retains_source_line_and_construct(self):
-        source = 'message = "Hello"\nmessage\n'
+        source = "condition if true_value else false_value"
+        span = hr.SourceSpan("encoding.gvm", 1, 0, 1, len(source), source)
         target = InstructionSetBuilder().include_all().build()
-        result = compile_source(
-            source,
-            filename="encoding.gvm",
-            instruction_set=target,
+        result = CompilationResult(
+            [ir.Ternary()],
+            [InstructionOrigin(span, "ternary expression")],
         )
         with self.assertRaises(BytecodeEncodingError) as raised:
             bytecode(result, instruction_set=target)
         message = str(raised.exception)
-        self.assertIn("encoding.gvm:1:11", message)
-        self.assertIn('message = "Hello"', message)
-        self.assertIn("string literal", message)
-        self.assertIn("Malloc", message)
-        self.assertIn("Store", message)
+        self.assertIn("encoding.gvm:1:1", message)
+        self.assertIn(source, message)
+        self.assertIn("ternary expression", message)
+        self.assertIn("Ternary", message)
         self.assertIn("explicit .opcode", message)
 
 

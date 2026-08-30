@@ -498,6 +498,9 @@ class SignatureInferer:
         return None
 
     def _infer_call(self, node, environment, caller):
+        if node.func == "input" and len(node.args) == 1:
+            self._infer_expression(node.args[0], environment, caller, INT)
+            return STR
         if node.func == "len" and len(node.args) == 1:
             value_type = self._infer_expression(node.args[0], environment, caller)
             if value_type == STR or isinstance(value_type, ListType):

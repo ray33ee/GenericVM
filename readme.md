@@ -137,7 +137,7 @@ target = (
         BuiltinDefinition(
             "random",
             BuiltinKind.FUNCTION,
-            BuiltinSignature((INT,), INT, opcode=1005),
+            BuiltinSignature((INT,), INT, opcode=1010),
         )
     )
     .build()
@@ -146,6 +146,14 @@ target = (
 
 `BuiltinKind.INSTRUCTION` is for immediate, constant-argument VM operations;
 `BuiltinKind.FUNCTION` is for operand-stack-based operations.
+
+The language intrinsic `input(length)` returns a newly allocated string. The
+compiler emits `Malloc` for `length + 1` words and then the native `Input`
+instruction (opcode `1005`) with the new character location and maximum length
+on the operand stack in `[location, maximum_length]` order. `Input` records the actual entered length immediately
+before the characters. The compiler preserves a separate copy of the allocated
+string pointer because the native instruction consumes both operands and does
+not push a result.
 
 ## Interpreter support and bytecode support
 
@@ -160,8 +168,8 @@ operation as bytecode, the VM designer must explicitly assign its opcode:
 ```python
 target = (
     InstructionSetBuilder()
-    .include(ir.Malloc)
-    .opcode(ir.Malloc, 170)
+    .include(ir.Ternary)
+    .opcode(ir.Ternary, 170)
     .build()
 )
 ```

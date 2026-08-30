@@ -368,26 +368,32 @@ class Ternary(Instruction):
 ###### Heap
 
 class Store(Instruction):
-    pass
+    OPCODE = 1004
 
 
 class Load(Instruction):
-    pass
+    OPCODE = 1003
 
 ###### Memory
 
 class Malloc(Instruction):
-    pass
+    OPCODE = 1006
 
 
 class Free(Instruction):
-    pass
+    OPCODE = 1007
+
+
+class Input(Instruction):
+    """Consume stack operands [location, maximum_length] and fill the string buffer."""
+
+    OPCODE = 1005
 
 
 ###### Stack manip
 
 class Dupe(Instruction):
-    pass
+    OPCODE = 200
 
 
 class Drop(Instruction):

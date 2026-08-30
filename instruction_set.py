@@ -77,6 +77,7 @@ class InstructionGroup:
     LOGICAL = frozenset({ir.LogicalAnd, ir.LogicalOr, ir.LogicalNot})
     CONVERSIONS = frozenset({ir.IntToFloat, ir.ConvertFloatToInt})
     HEAP = frozenset({ir.Malloc, ir.Free, ir.Load, ir.Store})
+    IO = frozenset({ir.Input})
     STACK_MANIPULATION = frozenset({ir.Dupe, ir.Drop, ir.Roll})
     PRINTING = frozenset({
         ir.PrintInt, ir.PrintFloat, ir.PrintString, ir.PrintBool, ir.PrintChar,

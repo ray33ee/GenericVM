@@ -2,7 +2,7 @@
 
 import interpreter
 from compiler import compile_source
-
+from bytecode import bytecode
 
 SOURCE = """
 
@@ -11,9 +11,9 @@ main()
 
 def main():
     
-    y = str(1.2)
+    y = input(256)
     
-    print(y + "\\n")
+    print(y == "no")
     
 """
 
@@ -40,6 +40,8 @@ def main():
     print("END PROGRAM")
     print()
     print(f"Interpreter result: {return_value}")
+
+    print(bytecode(result, instruction_set=target))
 
 if __name__ == "__main__":
     main()

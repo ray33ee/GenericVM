@@ -7,7 +7,7 @@ INTERPRETER_INSTRUCTION_SET = InstructionSet(frozenset({
     ir.FAdd, ir.FMultiply, ir.FSub, ir.FUnaryNegative, ir.FUnaryPositive,
     ir.GlobalAlloc, ir.GreaterThan, ir.GreaterThanEqualTo, ir.Jump,
     ir.JumpIfFalse, ir.JumpIfTrue, ir.LessThan, ir.LessThanEqualTo, ir.Load,
-    ir.LocalAlloc, ir.LogicalAnd, ir.LogicalNot, ir.LogicalOr, ir.Malloc,
+    ir.Input, ir.LocalAlloc, ir.LogicalAnd, ir.LogicalNot, ir.LogicalOr, ir.Malloc,
     ir.IMultiply, ir.IntToFloat, ir.NotEqual, ir.OnesComplement, ir.OpStackPopArg,
     ir.OpStackPopGlobal, ir.OpStackPopLocal, ir.OpStackPopToCallStack,
     ir.OpStackPushArg, ir.OpStackPushGlobal, ir.OpStackPushLiteral,
@@ -121,6 +121,20 @@ class Interpreter:
                 op_stack.append(op.value)
             elif isinstance(op, ir.BuiltInInstruction):
                 raise Exception(f"Interpreter has no implementation for external built-in '{op.name}'")
+            elif isinstance(op, ir.BuiltInFunction):
+                raise Exception(f"Interpreter has no implementation for external built-in '{op.name}'")
+
+            elif isinstance(op, ir.Input):
+                maximum_length = op_stack.pop()
+                pointer = op_stack.pop()
+                if pointer < 1:
+                    raise Exception("INPUT location must leave room for the string length")
+                if maximum_length < 0:
+                    raise Exception("INPUT maximum length cannot be negative")
+                value = input()[:maximum_length]
+                heap[pointer - 1] = len(value)
+                for index, character in enumerate(value):
+                    heap[pointer + index] = ord(character)
 
             elif isinstance(op, ir.PrintInt):
                 print(f"{op_stack.pop()}", end='')
