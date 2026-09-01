@@ -674,7 +674,8 @@ class TypeChecker(hr.Walker):
 
         magic_methods = {
             ast.Add: ("__add__", "__radd__"), ast.Sub: ("__sub__", "__rsub__"),
-            ast.Mult: ("__mul__", "__rmul__"), ast.BitAnd: ("__and__", "__rand__"),
+            ast.Mult: ("__mul__", "__rmul__"), ast.Mod: ("__mod__", "__rmod__"),
+            ast.BitAnd: ("__and__", "__rand__"),
             ast.BitOr: ("__or__", "__ror__"), ast.BitXor: ("__xor__", "__rxor__"),
             ast.LShift: ("__lshift__", "__rlshift__"), ast.RShift: ("__rshift__", "__rrshift__"),
             ast.Eq: ("__eq__", "__eq__"), ast.NotEq: ("__ne__", "__ne__"),
@@ -700,7 +701,7 @@ class TypeChecker(hr.Walker):
             node.operand_type = receiver_type
             return self.set_type(node, method.return_type)
 
-        arithmetic = {ast.Add, ast.Sub, ast.Mult}
+        arithmetic = {ast.Add, ast.Sub, ast.Mult, ast.Mod}
         ordering = {ast.Lt, ast.Gt, ast.LtE, ast.GtE}
         equality = {ast.Eq, ast.NotEq}
         bitwise = {ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift}
@@ -728,6 +729,10 @@ class TypeChecker(hr.Walker):
                 or (left_type in {INT, BOOL} and right_type == STR)
             ):
                 result = STR
+            elif operator is ast.Mod and (
+                left_type not in {INT, BOOL} or right_type not in {INT, BOOL}
+            ):
+                self.error(node, "Operator Mod requires int operands")
             elif left_type not in {INT, BOOL, FLOAT} or right_type not in {INT, BOOL, FLOAT}:
                 # Add will also gain a separate string-concatenation branch later.
                 self.error(node, f"Operator {operator.__name__} requires numeric operands")

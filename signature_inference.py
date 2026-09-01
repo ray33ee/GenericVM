@@ -395,7 +395,7 @@ class SignatureInferer:
             if isinstance(container, ListType):
                 return container.element_type
             if container == STR:
-                return INT
+                return CHAR
             if isinstance(container, TupleType):
                 index = self._integer_literal(node.slice)
                 if index is None:
@@ -432,7 +432,8 @@ class SignatureInferer:
             if isinstance(left, ClassType) or isinstance(right, ClassType):
                 methods = {
                     ast.Add: ("__add__", "__radd__"), ast.Sub: ("__sub__", "__rsub__"),
-                    ast.Mult: ("__mul__", "__rmul__"), ast.BitAnd: ("__and__", "__rand__"),
+                    ast.Mult: ("__mul__", "__rmul__"), ast.Mod: ("__mod__", "__rmod__"),
+                    ast.BitAnd: ("__and__", "__rand__"),
                     ast.BitOr: ("__or__", "__ror__"), ast.BitXor: ("__xor__", "__rxor__"),
                     ast.LShift: ("__lshift__", "__rlshift__"), ast.RShift: ("__rshift__", "__rrshift__"),
                     ast.Eq: ("__eq__", "__eq__"), ast.NotEq: ("__ne__", "__ne__"),
@@ -466,6 +467,8 @@ class SignatureInferer:
                 or (left in {INT, BOOL} and right in {STR, CHAR})
             ):
                 return STR
+            if operator is ast.Mod:
+                return INT if left in {INT, BOOL} and right in {INT, BOOL} else None
             if left is None or right is None:
                 return None
             if left == FLOAT or right == FLOAT:

@@ -812,6 +812,7 @@ class _Compiler(hr.Walker):
             ast.Add: ir.IAdd,
             ast.Mult: ir.IMultiply,
             ast.Sub: ir.ISub,
+            ast.Mod: ir.IMod,
         }
         floating_numeric = {
             ast.Add: ir.FAdd,

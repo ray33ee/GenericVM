@@ -185,6 +185,22 @@ def invalid(flag: bool) -> int:
 
 
 class TypedCompilerTests(unittest.TestCase):
+    def test_integer_modulo_is_typed_compiled_and_interpreted(self):
+        module = hr.ast_to_hr(ast.parse("""
+main()
+
+def main() -> int:
+    return 17 % 5
+"""))
+        instructions = compile(module, Symbols(module), {}, {})
+
+        self.assertEqual(interpreter.Interpreter().run(instructions), 2)
+        self.assertEqual(sum(isinstance(item, ir.IMod) for item in instructions), 1)
+
+    def test_modulo_rejects_float_operands(self):
+        with self.assertRaisesRegex(TypeCheckError, "Mod requires int operands"):
+            analyse("result = 5.0 % 2")
+
     def test_mixed_numeric_arithmetic_promotes_int_and_uses_float_instruction(self):
         module = hr.ast_to_hr(ast.parse("""
 main()

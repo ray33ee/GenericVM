@@ -235,6 +235,12 @@ class IMultiply(Instruction):
 
     pass
 
+class IMod(Instruction):
+
+    OPCODE = 113
+
+    pass
+
 class And(Instruction):
 
     OPCODE = 103

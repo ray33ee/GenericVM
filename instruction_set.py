@@ -68,7 +68,7 @@ class InstructionGroup:
         ir.LessThanEqualTo, ir.GreaterThanEqualTo,
     })
     ARITHMETIC = frozenset({
-        ir.IAdd, ir.ISub, ir.IMultiply, ir.IUnaryNegative, ir.IUnaryPositive,
+        ir.IAdd, ir.ISub, ir.IMultiply, ir.IMod, ir.IUnaryNegative, ir.IUnaryPositive,
         ir.FAdd, ir.FSub, ir.FMultiply, ir.FUnaryNegative, ir.FUnaryPositive,
     })
     BITWISE = frozenset({

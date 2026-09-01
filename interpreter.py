@@ -2,13 +2,21 @@ import ir
 from instruction_set import CompilationResult, InstructionSet, validate_instruction_set
 
 
+BLUE = "\033[34m"
+RESET_COLOUR = "\033[0m"
+
+
+def print_vm_output(value):
+    print(f"{BLUE}{value}{RESET_COLOUR}", end='')
+
+
 INTERPRETER_INSTRUCTION_SET = InstructionSet(frozenset({
     ir.IAdd, ir.And, ir.Assert, ir.Call, ir.Drop, ir.Dupe, ir.Equal, ir.Free,
     ir.FAdd, ir.FMultiply, ir.FSub, ir.FUnaryNegative, ir.FUnaryPositive,
     ir.GlobalAlloc, ir.GreaterThan, ir.GreaterThanEqualTo, ir.Jump,
     ir.JumpIfFalse, ir.JumpIfTrue, ir.LessThan, ir.LessThanEqualTo, ir.Load,
     ir.Input, ir.LocalAlloc, ir.LogicalAnd, ir.LogicalNot, ir.LogicalOr, ir.Malloc,
-    ir.IMultiply, ir.IntToFloat, ir.NotEqual, ir.OnesComplement, ir.OpStackPopArg,
+    ir.IMod, ir.IMultiply, ir.IntToFloat, ir.NotEqual, ir.OnesComplement, ir.OpStackPopArg,
     ir.OpStackPopGlobal, ir.OpStackPopLocal, ir.OpStackPopToCallStack,
     ir.OpStackPushArg, ir.OpStackPushGlobal, ir.OpStackPushLiteral,
     ir.OpStackPushLocal, ir.Or, ir.PrintBool, ir.PrintChar, ir.PrintFloat, ir.PrintInt,
@@ -141,20 +149,19 @@ class Interpreter:
                     heap[pointer + index] = ord(character)
 
             elif isinstance(op, ir.PrintInt):
-                print(f"{op_stack.pop()}", end='')
+                print_vm_output(op_stack.pop())
             elif isinstance(op, ir.PrintFloat):
-                print(f"{op_stack.pop()}", end='')
+                print_vm_output(op_stack.pop())
             elif isinstance(op, ir.PrintString):
                 pointer = op_stack.pop()
                 length = heap[pointer - 1]
-                print(
-                    "".join(chr(heap[pointer + index]) for index in range(length)),
-                    end='',
+                print_vm_output(
+                    "".join(chr(heap[pointer + index]) for index in range(length))
                 )
             elif isinstance(op, ir.PrintBool):
-                print("True" if bool(op_stack.pop()) else "False", end='')
+                print_vm_output("True" if bool(op_stack.pop()) else "False")
             elif isinstance(op, ir.PrintChar):
-                print(chr(op_stack.pop()), end='')
+                print_vm_output(chr(op_stack.pop()))
 
             elif isinstance(op, ir.Jump):
                 pc = op.location
@@ -203,6 +210,10 @@ class Interpreter:
                 b = op_stack.pop()
                 a = op_stack.pop()
                 op_stack.append(a * b)
+            elif isinstance(op, ir.IMod):
+                b = op_stack.pop()
+                a = op_stack.pop()
+                op_stack.append(a % b)
             elif isinstance(op, ir.LogicalAnd):
                 b = op_stack.pop()
                 a = op_stack.pop()

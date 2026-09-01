@@ -6,92 +6,140 @@ from bytecode import bytecode
 
 SOURCE = """
 
-
-main()
-
 def copy_string(s, d):
     d[0] = len(s)
-    
+
     for i in range(len(s)):
         d[i+1] = ord(s[i])
 
+class PRNG:
+    def __init__(self, s):
+        self.seed = 0x6D2B79F5
+
+        for i in range(100):
+            self.seed += ord(s[i]) - i
+            self.seed += self.seed << 7
+            self.seed *= 0xC2B2AE35
+            self.seed ^= self.seed >> 9
+            self.seed += self.seed << 3
+
+    def __next__(self):
+        self.seed ^= self.seed << 13
+        self.seed ^= self.seed >> 17
+        self.seed *= 0x2C1B3C6D
+        self.seed ^= self.seed << 5
+
+        self.seed += 0x9E3779B9
+
+        return self.seed
+
+def contains(list, number, index):
+
+    r = False
+
+    for i in range(index):
+        if number == list[i]:
+            r = True
+
+    return r
+
+def from_hex(c):
+    return (ord(c) & 0x0F) + (ord(c) >= ord('A')) * 9
+
+main()
+
 def main():
-    
+    PRIME = 65521
+
+    #################### Get the username and password inputs
     print("Enter username: ")
-    username = input(100)
-    
+    u = input(100)
+
     print("Enter password: ")
-    password = input(100)
-    
+    k = input(100)
+
+    #################### Move them to a 100 buffer
     username_buff = malloc(101)
     password_buff = malloc(101)
-    
-    copy_string(username, username_buff)
-    copy_string(password, password_buff)
-    
-    user = cast_str(username_buff + 1)
-    passwd = cast_str(password_buff + 1)
-    
-    char_sum = 0
-    
-    lower_case_u = 0
-    lower_case_p = 0
-    
-    upper_case = 0
-    digit_sum = 0
-    special_21_sum = 0
-    special_3a_sum = 0
-    special_5b_sum = 0
-    lengths = 0
-    
-    for i in range(100):
-    
-        u = ord(user[i])
-        p = ord(passwd[i])
-    
-        # Sum of chars (mod 256) in username and password must be equal
-        char_sum += u - p
-        
-        # Number of lower case chars in username and password must be equal but not 0
-        lower_case_u += u >= 0x61 and u <= 0x7A
-        
-        lower_case_p += p >= 0x61 and p <= 0x7A
-        
-        # Password must have exactly 4 more uppercase chars than username
-        upper_case -= u >= 0x41 and u <= 0x5A
-        
-        upper_case += p >= 0x41 and p <= 0x5A
-        
-        # Sum of all digits in username and password must be 8
-        digit_sum += (u >= 0x30 and u <= 0x39) * (u - 0x30)
-        
-        digit_sum += (p >= 0x30 and p <= 0x39) * (p - 0x30)
-        
-        # Number of special chars from 0x21 to 0x2f in password must be one more then the number of vowels in username
-        special_21_sum += p >= 0x21 and p <= 0x2f
-        
-        special_21_sum -= u == 0x41 or u == 0x45 or u == 0x49 or u == 0x4F or u == 0x55 or u == 0x61 or u == 0x65 or u == 0x69 or u == 0x6F or u == 0x75
-        
-        # Password cannot have any specials from 0x3a to 0x40
-        special_3a_sum += p >= 0x3a and p <= 0x40
-             
-        # Password cannot have any specials from 0x3a to 0x40
-        special_5b_sum += p >= 0x5B and p <= 0x60
-        
-        # password length must be exactly twice the length of the username length
-        lengths += 2 * (u != 0)
-        
-        lengths -= p != 0
-            
-    well_done = "well done lmao\\n"
-    nope = "nope\\n"
-    
-    if char_sum & 0xFF == 0 and lower_case_u == lower_case_p and lower_case_p != 0 and upper_case == 4 and digit_sum == 8 and special_21_sum == 1 and special_3a_sum == 0 and lengths == 0 and special_5b_sum == 2:
-        print(well_done)
+
+    copy_string(u, username_buff)
+    copy_string(k, password_buff)
+
+    username = cast_str(username_buff + 1)
+    password = cast_str(password_buff + 1)
+
+    rng = PRNG(username)
+
+    x = malloc(10)
+    y = malloc(10)
+
+    poly = malloc(10)
+
+    is_dashes = 1
+
+    #################### password string validations
+    for i in range(9):
+        is_dashes &= password[i*5+4] == "-"
+
+    is_hex = 1
+    i = 0
+    while i < 49:
+        is_hex &= (password[i] >= "0" and password[i] <= "9") or (password[i] >= "A" and password[i] <= "F")
+
+        i += 1
+
+        if i % 5 == 4:
+            i += 1
+
+    #################### Get 10 (x, y) pairs ensuring x is unique and x, y are mod PRIME
+    i = 0
+    while i < 10:
+        v = next(rng) % PRIME
+
+        if contains(x, v, i):
+            continue
+
+        x[i] = v
+
+        y[i] = next(rng) % PRIME
+
+        i += 1
+
+    #################### Get password coeffs
+    for i in range(10):
+        ind = i * 5
+        c4 = from_hex(password[ind])
+        c3 = from_hex(password[ind+1])
+        c2 = from_hex(password[ind+2])
+        c1 = from_hex(password[ind+3])
+
+        coeff = c4 * 4096 + c3 * 256 + c2 * 16 + c1
+
+        poly[i] = coeff
+
+    fits = 1
+
+    #################### For each (x, y) check it lies in poly
+    for i in range(10):
+
+        s = 0
+
+        for j in range(10):
+
+            s = (((s * x[i]) % 65521) + poly[j]) % 65521
+
+
+        fits &= s == y[i]
+
+    yes = "yes\\n"
+    no = "no\\n"
+
+    if is_dashes == 1 and is_hex == 1 and len(k) == 49 and fits == 1:
+        print(yes)
     else:
-        print(nope)
-    
-    
+        print(no)
+
+
 """
 
 

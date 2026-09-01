@@ -7,14 +7,15 @@
     <list default="true" id="b70efea7-a50f-4ee1-aa71-4ed56255ce01" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/compiler.py" beforeDir="false" afterPath="$PROJECT_DIR$/compiler.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/instruction_set.py" beforeDir="false" afterPath="$PROJECT_DIR$/instruction_set.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/interpreter.py" beforeDir="false" afterPath="$PROJECT_DIR$/interpreter.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ir.py" beforeDir="false" afterPath="$PROJECT_DIR$/ir.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/readme.md" beforeDir="false" afterPath="$PROJECT_DIR$/readme.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/signature_inference.py" beforeDir="false" afterPath="$PROJECT_DIR$/signature_inference.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/test_instruction_set.py" beforeDir="false" afterPath="$PROJECT_DIR$/test_instruction_set.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/test_signature_inference.py" beforeDir="false" afterPath="$PROJECT_DIR$/test_signature_inference.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/test_typecheck.py" beforeDir="false" afterPath="$PROJECT_DIR$/test_typecheck.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/todo.md" beforeDir="false" afterPath="$PROJECT_DIR$/todo.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/typecheck.py" beforeDir="false" afterPath="$PROJECT_DIR$/typecheck.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/typesystem.py" beforeDir="false" afterPath="$PROJECT_DIR$/typesystem.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />

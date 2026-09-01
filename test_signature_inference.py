@@ -7,7 +7,7 @@ from compiler import compile
 from signature_inference import DeadCodeError, SignatureInferenceError
 from symbols import Symbols
 from typecheck import TypeCheckError, check_types
-from typesystem import BOOL, FLOAT, INT, TupleType
+from typesystem import BOOL, CHAR, FLOAT, INT, TupleType
 
 
 def analyse(source: str):
@@ -86,6 +86,19 @@ def add(left, right):
         self.assertIs(function.args[1].annotation, INT)
         self.assertIs(function.return_type, INT)
         self.assertIs(symbols.top_level["result"].type, INT)
+
+    def test_string_subscript_infers_char_function_parameter(self):
+        module, _ = analyse("""
+text = "AB"
+result = from_char(text[0])
+result
+
+def from_char(character):
+    return ord(character)
+""")
+        function = function_named(module, "from_char")
+        self.assertIs(function.args[0].annotation, CHAR)
+        self.assertIs(function.return_type, INT)
 
     def test_fully_inferred_function_executes(self):
         self.assertEqual(run("""
