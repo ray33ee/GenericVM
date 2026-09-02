@@ -6,6 +6,15 @@ class Type:
 
 
 @dataclass(frozen=True)
+class UnknownType(Type):
+    def __str__(self):
+        return "?"
+
+    def __repr__(self):
+        return "?"
+
+
+@dataclass(frozen=True)
 class PrimitiveType(Type):
     name: str
 
@@ -76,6 +85,7 @@ STR = PrimitiveType("str")
 CHAR = PrimitiveType("char")
 PTR = PrimitiveType("ptr")
 NONE = PrimitiveType("NoneType")
+UNKNOWN = UnknownType()
 
 # One-argument Python protocol conveniences. A None result means the dunder's
 # declared return type is used (for iterator and value-producing protocols).
@@ -114,6 +124,8 @@ def word_count(value_type: Type) -> int:
     """Number of VM words in the flattened runtime representation."""
     if value_type == NONE:
         return 0
+    if value_type == STR:
+        return 2
     if isinstance(value_type, TupleType):
         return sum(word_count(element) for element in value_type.element_types)
     return 1
@@ -132,4 +144,14 @@ def contains_tuple(value_type: Type) -> bool:
         return True
     if isinstance(value_type, ListType):
         return contains_tuple(value_type.element_type)
+    return False
+
+
+def contains_unknown(value_type: Type) -> bool:
+    if value_type == UNKNOWN:
+        return True
+    if isinstance(value_type, ListType):
+        return contains_unknown(value_type.element_type)
+    if isinstance(value_type, TupleType):
+        return any(contains_unknown(item) for item in value_type.element_types)
     return False

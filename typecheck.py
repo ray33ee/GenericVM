@@ -1,4 +1,5 @@
 import ast
+import copy
 
 import hr
 import string_runtime
@@ -19,6 +20,8 @@ from typesystem import (
     ListType,
     TupleType,
     Type,
+    UNKNOWN,
+    contains_unknown,
     contains_tuple,
     tuple_member_layout,
     word_count,
@@ -42,6 +45,7 @@ class TypeChecker(hr.Walker):
         self.expected_return_type: Type | None = None
         self.allow_joined_str = False
         self.allow_auto_string = False
+        self.provisional_lists: dict[int, dict] = {}
         self.function_types = {
             function.qualified_name: FunctionType(
                 tuple(argument.annotation for argument in function.args),
@@ -60,15 +64,11 @@ class TypeChecker(hr.Walker):
         for class_info in symbols.classes.values():
             for field in class_info.fields.values():
                 self._validate_type(class_info.definition, field.type)
-                if contains_tuple(field.type):
+                self._reject_tuple_in_heap_container(class_info.definition, field.type)
+                if word_count(field.type) == 0:
                     self.error(
                         class_info.definition,
-                        f"Field '{class_info.name}.{field.name}' cannot store stack-only tuple type {field.type}",
-                    )
-                if word_count(field.type) != 1:
-                    self.error(
-                        class_info.definition,
-                        f"Field '{class_info.name}.{field.name}' must occupy exactly one heap word, found {field.type}",
+                        f"Field '{class_info.name}.{field.name}' must occupy at least one heap word, found {field.type}",
                     )
         for name, builtin in builtins.items():
             for parameter_type in builtin.parameter_types:
@@ -83,6 +83,13 @@ class TypeChecker(hr.Walker):
 
     def check(self, module: hr.Module) -> hr.Module:
         self.walk(module)
+        seen_pending = set()
+        for pending in self.provisional_lists.values():
+            if id(pending) in seen_pending:
+                continue
+            seen_pending.add(id(pending))
+            if any(contains_unknown(symbol.type) for symbol in pending["symbols"]):
+                self.error(pending["literal"], "Cannot infer the element type of an empty list")
         self._assert_all_expressions_typed(module)
         self.symbols.dead_global_check()
         return module
@@ -126,6 +133,16 @@ class TypeChecker(hr.Walker):
         previous_return = self.expected_return_type
         self.context = self.symbols.functions[node.qualified_name]
         self.expected_return_type = node.return_type
+
+        for argument in node.args:
+            if argument.default is not None:
+                default_type = self.infer(argument.default, argument.annotation)
+                self.require(
+                    argument.default,
+                    default_type,
+                    argument.annotation,
+                    f"Invalid default for parameter '{argument.name}'",
+                )
 
         for statement in node.body:
             self.walk(statement)
@@ -174,8 +191,7 @@ class TypeChecker(hr.Walker):
                         f"Class '{receiver_type.name}' has no field '{node.lhs.attr}'",
                     )
                 value_type = self.infer(node.rhs)
-                if contains_tuple(value_type):
-                    self.error(node.rhs, "Tuples cannot be stored in class fields")
+                self._reject_tuple_in_heap_container(node.rhs, value_type)
                 class_info.fields[node.lhs.attr] = FieldInfo(node.lhs.attr, value_type)
                 node.lhs.resolved_class = receiver_type.name
                 self.set_type(node.lhs, value_type)
@@ -187,7 +203,31 @@ class TypeChecker(hr.Walker):
 
         symbol = self.symbol(node.lhs)
         expected = node.annotation or symbol.type
+        if (
+            expected is None
+            and isinstance(node.rhs, hr.List)
+            and not node.rhs.elements
+        ):
+            provisional = ListType(UNKNOWN)
+            symbol.type = provisional
+            node.rhs.type = provisional
+            node.lhs.type = provisional
+            self.provisional_lists[id(symbol)] = {
+                "symbols": [symbol], "nodes": [node.rhs, node.lhs], "literal": node.rhs,
+            }
+            return
         value_type = self.infer(node.rhs, expected)
+
+        if (
+            isinstance(value_type, ListType)
+            and value_type.element_type == UNKNOWN
+            and isinstance(node.rhs, hr.Name)
+        ):
+            source_pending = self.provisional_lists.get(id(self.symbol(node.rhs)))
+            if source_pending is not None:
+                source_pending["symbols"].append(symbol)
+                source_pending["nodes"].append(node.lhs)
+                self.provisional_lists[id(symbol)] = source_pending
 
         self._reject_tuple_in_heap_container(node, value_type)
 
@@ -227,17 +267,78 @@ class TypeChecker(hr.Walker):
         self._check_condition(node.test)
 
     def visit_For(self, node):
-        if isinstance(node.assignable, hr.Name):
-            target_symbol = self.symbol(node.assignable)
-            if target_symbol.type is None:
-                target_symbol.type = INT
-        target_type = self.infer(node.assignable)
-        self.require(node.assignable, target_type, INT, "Range loop target must be int")
-        for value in (node.start, node.end, node.step):
-            if isinstance(value, hr.Expression):
-                actual = self.infer(value, INT)
-                self.require(value, actual, INT, "Range argument must be int")
+        target_symbol = self.symbol(node.target)
+        iterable = node.iterable
+
+        if isinstance(iterable, hr.Call) and iterable.func == "range":
+            if not 1 <= len(iterable.args) <= 3:
+                self.error(iterable, "range expects one to three arguments")
+            for argument in iterable.args:
+                actual = self.infer(argument, INT)
+                self.require(argument, actual, INT, "Range argument must be int")
+            zero = hr.Constant(node.lineno, 0)
+            zero.type = INT
+            one = hr.Constant(node.lineno, 1)
+            one.type = INT
+            if len(iterable.args) == 1:
+                node.range_start, node.range_stop, node.range_step = zero, iterable.args[0], one
+            elif len(iterable.args) == 2:
+                node.range_start, node.range_stop, node.range_step = iterable.args[0], iterable.args[1], one
+            else:
+                node.range_start, node.range_stop, node.range_step = iterable.args
+                if self._integer_literal(node.range_step) == 0:
+                    self.error(node.range_step, "range step cannot be zero")
+            node.loop_kind = "range"
+            # range is a for-loop syntax form in GenericVM rather than a
+            # first-class source value, but it remains an Expression in HR.
+            iterable.type = NONE
+            element_type = INT
+        else:
+            iterable_type = self.infer(iterable)
+            if iterable_type == STR:
+                node.loop_kind = "string"
+                element_type = CHAR
+            elif isinstance(iterable_type, ListType):
+                node.loop_kind = "list"
+                node.element_width = word_count(iterable_type.element_type)
+                element_type = iterable_type.element_type
+            elif isinstance(iterable_type, ClassType):
+                iterable_info = self.symbols.classes[iterable_type.name]
+                iter_method = iterable_info.methods.get("__iter__")
+                if iter_method is None:
+                    self.error(iterable, f"Class '{iterable_type.name}' does not implement __iter__")
+                if len(iter_method.args) != 1:
+                    self.error(iter_method, f"Protocol method '{iter_method.qualified_name}' takes no explicit arguments")
+                iterator_type = iter_method.return_type
+                if not isinstance(iterator_type, ClassType) or iterator_type.name not in self.symbols.classes:
+                    self.error(iter_method, f"Iterator method '{iter_method.qualified_name}' must return a class type")
+                iterator_info = self.symbols.classes[iterator_type.name]
+                bool_method = iterator_info.methods.get("__bool__")
+                next_method = iterator_info.methods.get("__next__")
+                if bool_method is None:
+                    self.error(iterable, f"Iterator class '{iterator_type.name}' does not implement __bool__")
+                if next_method is None:
+                    self.error(iterable, f"Iterator class '{iterator_type.name}' does not implement __next__")
+                for method in (bool_method, next_method):
+                    if len(method.args) != 1:
+                        self.error(method, f"Protocol method '{method.qualified_name}' takes no explicit arguments")
+                self.require(bool_method, bool_method.return_type, BOOL, f"Invalid return type for '{bool_method.qualified_name}'")
+                if next_method.return_type == NONE:
+                    self.error(next_method, f"Iterator method '{next_method.qualified_name}' must return a value")
+                node.loop_kind = "class_protocol"
+                node.iter_method = iter_method.qualified_name
+                node.bool_method = bool_method.qualified_name
+                node.next_method = next_method.qualified_name
+                element_type = next_method.return_type
+            else:
+                self.error(iterable, f"Type {iterable_type} is not iterable")
+
+        if target_symbol.type is None:
+            target_symbol.type = element_type
+        target_type = self.infer(node.target, element_type)
+        self.require(node.target, target_type, element_type, "Invalid for-loop target type")
         self.traverse(node.body)
+        self.traverse(node.orelse)
 
     def visit_Pass(self, node):
         pass
@@ -267,10 +368,29 @@ class TypeChecker(hr.Walker):
         symbol = self.symbol(node)
         if symbol.type is None:
             self.error(node, f"Cannot determine type of '{node.id}' before its first assignment")
-        return self.set_type(node, symbol.type)
+        result = self.set_type(node, symbol.type)
+        pending = self.provisional_lists.get(id(symbol))
+        if pending is not None:
+            pending["nodes"].append(node)
+        return result
+
+    def resolve_provisional_list(self, receiver, element_type):
+        if not isinstance(receiver, hr.Name):
+            self.error(receiver, "An untyped empty list must be stored in a name before mutation")
+        symbol = self.symbol(receiver)
+        pending = self.provisional_lists.get(id(symbol))
+        if pending is None:
+            return
+        resolved = ListType(element_type)
+        for pending_symbol in pending["symbols"]:
+            pending_symbol.type = resolved
+        for typed_node in pending["nodes"]:
+            typed_node.type = resolved
 
     def visit_List(self, node, expected=None):
         expected_element = expected.element_type if isinstance(expected, ListType) else None
+        if expected_element == UNKNOWN:
+            expected_element = None
         if not node.elements:
             if expected_element is None:
                 self.error(node, "Cannot infer the element type of an empty list")
@@ -308,6 +428,20 @@ class TypeChecker(hr.Walker):
 
     def visit_Subscript(self, node, expected=None):
         container_type = self.infer(node.value)
+        if isinstance(node.slice, hr.Slice):
+            if container_type != STR and not isinstance(container_type, ListType):
+                self.error(node.value, f"Type {container_type} does not support slicing")
+            if node.slice.step is not None:
+                self.error(node.slice.step, "Slice steps are not currently supported")
+            for bound in (node.slice.lower, node.slice.upper):
+                if bound is not None:
+                    bound_type = self.infer(bound, INT)
+                    self.require(bound, bound_type, INT, "Slice bound must be int")
+            if container_type == STR and (node.slice.lower is not None or node.slice.upper is not None):
+                node.resolved_runtime = "__gvm_str_slice"
+            elif isinstance(container_type, ListType):
+                node.resolved_list_slice = f"__gvm_list_slice_{word_count(container_type.element_type)}"
+            return self.set_type(node, container_type)
         index_type = self.infer(node.slice, INT)
         self.require(node.slice, index_type, INT, "Subscript index must be int")
 
@@ -337,13 +471,25 @@ class TypeChecker(hr.Walker):
         return self.set_type(node, result)
 
     def visit_Call(self, node, expected=None):
-        if node.func in {"cast_str", "cast_int", "cast_ptr"}:
+        if node.func == "cast_str":
+            if len(node.args) != 2:
+                self.error(node, "cast_str expects a pointer and length")
+            for argument, required in zip(node.args, (PTR, INT)):
+                actual = self.infer(argument, required)
+                self.require(argument, actual, required, f"cast_str argument must be {required}")
+            result_type = STR
+            node.resolved_intrinsic = node.func
+            node.expanded_argument_count = 2
+            return self.set_type(node, result_type)
+        if node.func in {"cast_int", "cast_ptr"}:
             if len(node.args) != 1:
                 self.error(node, f"{node.func} expects exactly one argument")
-            source_type = PTR if node.func == "cast_str" else STR
-            result_type = {"cast_str": STR, "cast_int": INT, "cast_ptr": PTR}[node.func]
-            actual = self.infer(node.args[0], source_type)
-            self.require(node.args[0], actual, source_type, f"{node.func} argument must be {source_type}")
+            actual = self.infer(node.args[0])
+            allowed = {STR, PTR} if node.func == "cast_int" else {STR, INT}
+            if actual not in allowed:
+                self.error(node.args[0], f"{node.func} cannot convert {actual}")
+            result_type = {"cast_int": INT, "cast_ptr": PTR}[node.func]
+            node.cast_source_type = actual
             node.resolved_intrinsic = node.func
             node.expanded_argument_count = 1
             return self.set_type(node, result_type)
@@ -385,7 +531,7 @@ class TypeChecker(hr.Walker):
         if node.func == "len" and len(node.args) == 1 and not isinstance(node.args[0], hr.Starred):
             value_type = self.infer(node.args[0])
             if value_type == STR or isinstance(value_type, ListType):
-                node.resolved_intrinsic = "len_heap"
+                node.resolved_intrinsic = "len_string" if value_type == STR else "len_heap"
                 node.expanded_argument_count = 1
                 return self.set_type(node, INT)
         if node.func in {"ord", "chr"}:
@@ -416,8 +562,15 @@ class TypeChecker(hr.Walker):
             node.expanded_argument_count = 1
             return self.set_type(node, NONE)
         if node.func == "print":
-            if len(node.args) > 1:
-                self.error(node, "print accepts zero or one argument")
+            if len(node.args) > 2:
+                self.error(node, "print accepts zero, one, or two arguments")
+            if len(node.args) == 2:
+                end_type = self.infer(node.args[1], STR)
+                self.require(node.args[1], end_type, STR, "print end argument must be str")
+                node.print_end = node.args[1]
+            else:
+                node.print_end = hr.Constant(node.lineno, "\n")
+                node.print_end.type = STR
             if not node.args:
                 node.resolved_builtin = "prints"
             else:
@@ -440,6 +593,16 @@ class TypeChecker(hr.Walker):
                     target = "printc"
                 elif argument_type == STR:
                     target = "prints"
+                elif isinstance(argument_type, ListType):
+                    self._validate_printable_type(node.args[0], argument_type.element_type)
+                    node.resolved_list_print = True
+                    node.expanded_argument_count = 1
+                    return self.set_type(node, NONE)
+                elif isinstance(argument_type, TupleType):
+                    self._validate_printable_type(node.args[0], argument_type)
+                    node.resolved_tuple_print = True
+                    node.expanded_argument_count = 1
+                    return self.set_type(node, NONE)
                 elif isinstance(argument_type, ClassType):
                     self._resolve_streamed_class(node, argument_type)
                     node.expanded_argument_count = 1
@@ -460,6 +623,24 @@ class TypeChecker(hr.Walker):
             signature = self.function_types[node.func]
         elif node.func in DUNDER_BUILTINS and len(node.args) == 1 and not isinstance(node.args[0], hr.Starred):
             receiver_type = self.infer(node.args[0])
+            if node.func == "int" and receiver_type in {INT, BOOL, STR}:
+                node.expanded_argument_count = 1
+                if receiver_type == STR:
+                    node.resolved_runtime = "__gvm_int_str"
+                elif receiver_type == BOOL:
+                    node.resolved_intrinsic = "int_bool"
+                else:
+                    node.resolved_intrinsic = "identity"
+                return self.set_type(node, INT)
+            if node.func == "bool" and receiver_type in {INT, BOOL, STR}:
+                node.expanded_argument_count = 1
+                if receiver_type == BOOL:
+                    node.resolved_intrinsic = "identity"
+                elif receiver_type == INT:
+                    node.resolved_intrinsic = "bool_int"
+                else:
+                    node.resolved_intrinsic = "bool_str"
+                return self.set_type(node, BOOL)
             if node.func == "str" and receiver_type in {STR, BOOL, INT, FLOAT}:
                 node.expanded_argument_count = 1
                 if receiver_type == STR:
@@ -601,6 +782,10 @@ class TypeChecker(hr.Walker):
                 self._validate_auto_string_fields(node, value_type, set())
                 node.auto_repr_class = value_type.name
             node.resolved_builtin = "prints"
+        elif isinstance(value_type, TupleType):
+            self._validate_printable_type(node.value, value_type)
+            node.resolved_tuple = True
+            node.resolved_builtin = "prints"
         else:
             self.error(node.value, f"F-string interpolation does not support {value_type}")
         return self.set_type(node, STR)
@@ -612,11 +797,38 @@ class TypeChecker(hr.Walker):
         for field in self.symbols.classes[class_type.name].fields.values():
             if field.type in {INT, FLOAT, BOOL, STR, CHAR}:
                 continue
+            if isinstance(field.type, ListType):
+                self._validate_printable_type(node, field.type.element_type, visiting)
+                continue
+            if isinstance(field.type, TupleType):
+                self._validate_printable_type(node, field.type, visiting)
+                continue
             if isinstance(field.type, ClassType):
                 self._validate_auto_string_fields(node, field.type, visiting)
                 continue
             self.error(node, f"Automatic string representation does not support field '{class_type.name}.{field.name}' of type {field.type}")
         visiting.remove(class_type.name)
+
+    def _validate_printable_type(self, node, value_type, visiting=None):
+        visiting = visiting if visiting is not None else set()
+        if value_type in {INT, FLOAT, BOOL, STR, CHAR}:
+            return
+        if isinstance(value_type, ListType):
+            self._validate_printable_type(node, value_type.element_type, visiting)
+            return
+        if isinstance(value_type, TupleType):
+            for element_type in value_type.element_types:
+                self._validate_printable_type(node, element_type, visiting)
+            return
+        if isinstance(value_type, ClassType):
+            class_info = self.symbols.classes[value_type.name]
+            method = class_info.methods.get("__str__") or class_info.methods.get("__repr__")
+            if method is not None:
+                self.require(method, method.return_type, STR, f"Invalid string method '{method.qualified_name}'")
+            else:
+                self._validate_auto_string_fields(node, value_type, visiting)
+            return
+        self.error(node, f"print does not support list element type {value_type}")
 
     def visit_Attribute(self, node, expected=None):
         receiver_type = self.infer(node.value)
@@ -644,12 +856,66 @@ class TypeChecker(hr.Walker):
                 self.require(argument, actual, parameter_type, f"Invalid argument to str.{node.method}")
             node.resolved_method = string_runtime.runtime_name(node.method)
             return self.set_type(node, return_type)
+        if isinstance(receiver_type, ListType):
+            element_type = receiver_type.element_type
+            if node.method == "append":
+                if len(node.args) != 1:
+                    self.error(node, "list.append expects one argument")
+                actual = self.infer(node.args[0], element_type)
+                if element_type == UNKNOWN:
+                    element_type = actual
+                    self.resolve_provisional_list(node.receiver, element_type)
+                else:
+                    self.require(node.args[0], actual, element_type, "Invalid list.append value")
+                result = NONE
+            elif node.method == "insert":
+                if len(node.args) != 2:
+                    self.error(node, "list.insert expects an index and value")
+                index_type = self.infer(node.args[0], INT)
+                self.require(node.args[0], index_type, INT, "list.insert index must be int")
+                actual = self.infer(node.args[1], element_type)
+                if element_type == UNKNOWN:
+                    element_type = actual
+                    self.resolve_provisional_list(node.receiver, element_type)
+                else:
+                    self.require(node.args[1], actual, element_type, "Invalid list.insert value")
+                result = NONE
+            elif node.method == "pop":
+                if element_type == UNKNOWN:
+                    self.error(node, "Cannot infer an empty list's element type from pop")
+                if len(node.args) > 1:
+                    self.error(node, "list.pop expects at most one index")
+                if node.args:
+                    index_type = self.infer(node.args[0], INT)
+                    self.require(node.args[0], index_type, INT, "list.pop index must be int")
+                result = element_type
+            elif node.method == "clear":
+                if element_type == UNKNOWN:
+                    self.error(node, "Cannot infer an empty list's element type from clear")
+                if node.args:
+                    self.error(node, "list.clear expects no arguments")
+                result = NONE
+            else:
+                self.error(node, f"List has no method '{node.method}'")
+            width = word_count(element_type)
+            node.resolved_list_method = (
+                "__gvm_list_clear" if node.method == "clear"
+                else f"__gvm_list_{node.method}_{width}"
+            )
+            return self.set_type(node, result)
         if not isinstance(receiver_type, ClassType):
             self.error(node, f"Type {receiver_type} has no methods")
         class_info = self.symbols.classes.get(receiver_type.name)
         if class_info is None or node.method not in class_info.methods:
             self.error(node, f"Class '{receiver_type.name}' has no method '{node.method}'")
         method = class_info.methods[node.method]
+        if not any(isinstance(argument, hr.Starred) for argument in node.args):
+            parameters = method.args[1:]
+            supplied = len(node.args)
+            if supplied < len(parameters):
+                omitted = parameters[supplied:]
+                if all(parameter.default is not None for parameter in omitted):
+                    node.args.extend(copy.deepcopy(parameter.default) for parameter in omitted)
         parameter_types = tuple(argument.annotation for argument in method.args[1:])
         self._check_expanded_arguments(node, node.args, parameter_types, method.qualified_name)
         node.resolved_method = method.qualified_name
@@ -906,10 +1172,9 @@ class TypeChecker(hr.Walker):
                     require_initialized_reads(statement.condition, current)
                     assigned_by_block(statement.body, current)
                 elif isinstance(statement, hr.For):
-                    for value in (statement.start, statement.end, statement.step):
-                        if isinstance(value, hr.HRNode):
-                            require_initialized_reads(value, current)
+                    require_initialized_reads(statement.iterable, current)
                     assigned_by_block(statement.body, current)
+                    assigned_by_block(statement.orelse, current)
                 else:
                     require_initialized_reads(statement, current)
                 if isinstance(statement, hr.Return):
@@ -987,5 +1252,27 @@ def check_types(
     symbols: Symbols,
     builtins: dict[str, BuiltinSignature],
 ) -> hr.Module:
+    _expand_default_arguments(module, symbols)
     infer_function_signatures(module, symbols, builtins)
     return TypeChecker(symbols, builtins).check(module)
+
+
+def _expand_default_arguments(module: hr.Module, symbols: Symbols) -> None:
+    """Lower omitted trailing arguments to copied call-site expressions."""
+    class ExpandDefaults(hr.Walker):
+        def visit_Call(self, node):
+            parameters = None
+            if node.func in symbols.functions:
+                parameters = symbols.functions[node.func][1].args
+            elif node.func in symbols.classes:
+                parameters = symbols.classes[node.func].methods["__init__"].args[1:]
+
+            if parameters is not None and not any(isinstance(arg, hr.Starred) for arg in node.args):
+                supplied = len(node.args)
+                if supplied < len(parameters):
+                    omitted = parameters[supplied:]
+                    if all(parameter.default is not None for parameter in omitted):
+                        node.args.extend(copy.deepcopy(parameter.default) for parameter in omitted)
+            self.generic_walk(node)
+
+    ExpandDefaults().walk(module)

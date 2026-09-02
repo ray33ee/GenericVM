@@ -137,24 +137,22 @@ class Interpreter:
                 raise Exception(f"Interpreter has no implementation for external built-in '{op.name}'")
 
             elif isinstance(op, ir.Input):
-                maximum_length = op_stack.pop()
-                pointer = op_stack.pop()
-                if pointer < 1:
-                    raise Exception("INPUT location must leave room for the string length")
+                maximum_length = op_stack[-1]
+                pointer = op_stack[-2]
                 if maximum_length < 0:
                     raise Exception("INPUT maximum length cannot be negative")
                 value = input()[:maximum_length]
-                heap[pointer - 1] = len(value)
                 for index, character in enumerate(value):
                     heap[pointer + index] = ord(character)
+                op_stack[-1] = len(value)
 
             elif isinstance(op, ir.PrintInt):
                 print_vm_output(op_stack.pop())
             elif isinstance(op, ir.PrintFloat):
                 print_vm_output(op_stack.pop())
             elif isinstance(op, ir.PrintString):
+                length = op_stack.pop()
                 pointer = op_stack.pop()
-                length = heap[pointer - 1]
                 print_vm_output(
                     "".join(chr(heap[pointer + index]) for index in range(length))
                 )

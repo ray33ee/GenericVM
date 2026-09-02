@@ -2,6 +2,7 @@ import ast
 import io
 import unittest
 from contextlib import redirect_stdout
+from unittest.mock import patch
 
 import hr
 import interpreter
@@ -201,7 +202,7 @@ def main():
     return
 """)
         self.assertEqual(sum(isinstance(item, ir.Malloc) for item in instructions), 1)
-        self.assertEqual(sum(isinstance(item, ir.Store) for item in instructions), 2)
+        self.assertEqual(sum(isinstance(item, ir.Store) for item in instructions), 1)
         output = io.StringIO()
         with redirect_stdout(output):
             interpreter.Interpreter().run(instructions)
@@ -484,7 +485,7 @@ def Duplicate():
 """)
 
     def test_zero_word_field_is_rejected(self):
-        with self.assertRaisesRegex(TypeCheckError, "exactly one heap word"):
+        with self.assertRaisesRegex(TypeCheckError, "at least one heap word"):
             compile_source("""
 class Invalid:
     value: None
@@ -559,13 +560,88 @@ def main():
     return
 """)
 
-    def test_tuple_field_is_rejected(self):
-        with self.assertRaisesRegex(TypeCheckError, "stack-only tuple"):
+    def test_tuple_field_is_stored_inline(self):
+        instructions = compile_source("""
+class Pair:
+    value: tuple[int, int]
+    def __init__(self, value: tuple[int, int]):
+        self.value = value
+
+main()
+def main() -> int:
+    pair = Pair((20, 22))
+    return pair.value[0] + pair.value[1]
+""")
+        self.assertEqual(interpreter.Interpreter().run(instructions), 42)
+
+    def test_tuple_field_can_be_replaced_as_a_whole(self):
+        instructions = compile_source("""
+class Pair:
+    value: tuple[int, int]
+    def __init__(self, value: tuple[int, int]):
+        self.value = value
+
+main()
+def main() -> int:
+    pair = Pair((1, 2))
+    pair.value = (19, 23)
+    return pair.value[0] + pair.value[1]
+""")
+        self.assertEqual(interpreter.Interpreter().run(instructions), 42)
+
+    def test_nested_tuple_field_uses_flattened_heap_layout(self):
+        instructions = compile_source("""
+class Nested:
+    value: tuple[int, tuple[int, int]]
+    def __init__(self, value: tuple[int, tuple[int, int]]):
+        self.value = value
+
+main()
+def main() -> int:
+    nested = Nested((1, (20, 22)))
+    return nested.value[1][0] * 100 + nested.value[1][1]
+""")
+        self.assertEqual(interpreter.Interpreter().run(instructions), 2022)
+
+    def test_tuple_field_supports_multiword_members(self):
+        instructions = compile_source("""
+class Data:
+    value: tuple[str, int]
+    def __init__(self, value: tuple[str, int]):
+        self.value = value
+
+main()
+def main() -> int:
+    data = Data(("abc", 39))
+    return len(data.value[0]) + data.value[1]
+""")
+        self.assertEqual(interpreter.Interpreter().run(instructions), 42)
+
+    def test_automatic_class_string_streams_tuple_fields(self):
+        instructions = compile_source("""
+class Thing:
+    x: tuple[int, int]
+    def __init__(self, x: tuple[int, int]):
+        self.x = x
+
+main()
+def main():
+    print(Thing((1, 2)), "")
+    return
+""")
+        output = io.StringIO()
+        with patch.object(interpreter, "BLUE", ""), patch.object(interpreter, "RESET_COLOUR", ""):
+            with redirect_stdout(output):
+                interpreter.Interpreter().run(instructions)
+        self.assertTrue(output.getvalue().startswith("Thing((1, 2))"))
+
+    def test_list_of_tuples_remains_invalid_as_a_class_field(self):
+        with self.assertRaisesRegex(TypeCheckError, "Tuples cannot be stored inside heap type"):
             compile_source("""
 class Bad:
-    value: tuple[int, int]
-    def __init__(self):
-        self
+    values: list[tuple[int, int]]
+    def __init__(self, values: list[tuple[int, int]]):
+        self.values = values
 """)
 
 

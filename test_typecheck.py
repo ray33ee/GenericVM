@@ -29,6 +29,12 @@ def analyse(source: str, builtins=None):
 
 
 class TypeInferenceTests(unittest.TestCase):
+    def test_string_slice_requires_integer_bounds_and_no_step(self):
+        with self.assertRaisesRegex(TypeCheckError, "bound must be int"):
+            analyse('text = "abc"\nresult = text["x":]\nresult\n')
+        with self.assertRaisesRegex(TypeCheckError, "steps are not currently supported"):
+            analyse('text = "abc"\nresult = text[::2]\nresult\n')
+
     def test_unannotated_variables_are_inferred(self):
         module, symbols = analyse("""
 x = 1
@@ -233,7 +239,7 @@ def main() -> float:
         self.assertTrue(any(isinstance(item, ir.FUnaryPositive) for item in instructions))
         self.assertTrue(any(isinstance(item, ir.FSub) for item in instructions))
 
-    def test_len_of_string_and_list_loads_heap_header(self):
+    def test_string_len_uses_value_word_and_list_len_loads_heap_header(self):
         module = hr.ast_to_hr(ast.parse("""
 main()
 
@@ -244,8 +250,148 @@ def main() -> int:
 """))
         instructions = compile(module, Symbols(module), {}, {})
         self.assertEqual(interpreter.Interpreter().run(instructions), 8)
-        self.assertEqual(sum(isinstance(item, ir.ISub) for item in instructions), 2)
-        self.assertEqual(sum(isinstance(item, ir.Load) for item in instructions), 2)
+        self.assertEqual(sum(isinstance(item, ir.ISub) for item in instructions), 0)
+        self.assertGreaterEqual(sum(isinstance(item, ir.Load) for item in instructions), 1)
+
+    def test_dynamic_list_mutations_preserve_aliases(self):
+        module = hr.ast_to_hr(ast.parse("""
+main()
+
+def main() -> int:
+    values = [1, 2]
+    alias = values
+    values.append(4)
+    values.insert(1, 3)
+    removed = alias.pop(0)
+    return removed + len(values) * 10 + alias[0] + alias[2]
+"""))
+        instructions = compile(module, Symbols(module), {}, {})
+        self.assertEqual(interpreter.Interpreter().run(instructions), 38)
+
+    def test_list_slice_is_an_independent_dynamic_list(self):
+        module = hr.ast_to_hr(ast.parse("""
+main()
+
+def main() -> int:
+    values = [10, 20, 30, 40]
+    sliced = values[-3:3]
+    sliced.append(50)
+    sliced[0] = 7
+    return len(values) * 100 + len(sliced) * 10 + sliced[0] + sliced[2]
+"""))
+        instructions = compile(module, Symbols(module), {}, {})
+        self.assertEqual(interpreter.Interpreter().run(instructions), 487)
+
+    def test_dynamic_list_supports_two_word_strings_and_clear(self):
+        module = hr.ast_to_hr(ast.parse("""
+main()
+
+def main() -> int:
+    values: list[str] = ["a"]
+    values.append("bc")
+    values.insert(1, "xyz")
+    removed: str = values.pop()
+    score: int = len(removed) + len(values[1])
+    values.clear()
+    return score + len(values)
+"""))
+        instructions = compile(module, Symbols(module), {}, {})
+        self.assertEqual(interpreter.Interpreter().run(instructions), 5)
+
+    def test_sparse_list_shrinks_without_losing_elements(self):
+        module = hr.ast_to_hr(ast.parse("""
+main()
+
+def main() -> int:
+    values: list[int] = []
+    i: int = 0
+    while i < 8:
+        values.append(i)
+        i = i + 1
+    while len(values) > 2:
+        values.pop()
+    return len(values) * 100 + values[0] * 10 + values[1]
+"""))
+        instructions = compile(module, Symbols(module), {}, {})
+        self.assertEqual(interpreter.Interpreter().run(instructions), 201)
+
+    def test_unknown_empty_list_propagates_through_alias(self):
+        module = hr.ast_to_hr(ast.parse("""
+main()
+
+def main() -> int:
+    values = []
+    alias = values
+    alias.append(7)
+    return values[0]
+"""))
+        symbols = Symbols(module)
+        instructions = compile(module, symbols, {}, {})
+        self.assertEqual(symbols.functions["main"][0]["values"].type, ListType(INT))
+        self.assertEqual(symbols.functions["main"][0]["alias"].type, ListType(INT))
+        self.assertEqual(interpreter.Interpreter().run(instructions), 7)
+
+    def test_empty_list_append_anchors_nested_constructor_call(self):
+        module = hr.ast_to_hr(ast.parse("""
+class Thing:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+main()
+
+def main():
+    values = []
+    for i in range(10):
+        values.append(Thing(i, i * 2))
+    return
+"""))
+        symbols = Symbols(module)
+        compile(module, symbols, {}, {})
+        constructor = symbols.classes["Thing"].methods["__init__"]
+        self.assertEqual([argument.annotation for argument in constructor.args[1:]], [INT, INT])
+        self.assertEqual(
+            symbols.functions["main"][0]["values"].type,
+            ListType(symbols.classes["Thing"].type),
+        )
+
+    def test_conflicting_evidence_for_unknown_list_is_rejected(self):
+        with self.assertRaisesRegex(TypeCheckError, "Invalid list.append value"):
+            analyse("""
+values = []
+values.append(1)
+values.append("two")
+values
+""")
+
+    def test_string_field_uses_two_contiguous_heap_words(self):
+        module = hr.ast_to_hr(ast.parse("""
+main()
+
+class Box:
+    text: str
+    def __init__(self, text: str):
+        self.text = text
+    def score(self) -> int:
+        return len(self.text) + ord(self.text[1])
+
+def main() -> int:
+    return Box("abc").score()
+"""))
+        instructions = compile(module, Symbols(module), {}, {})
+        self.assertEqual(interpreter.Interpreter().run(instructions), 101)
+
+    def test_list_of_strings_supports_indexed_load_and_store(self):
+        module = hr.ast_to_hr(ast.parse("""
+main()
+
+def main() -> int:
+    values: list[str] = ["a", "bc"]
+    values[0] = "xyz"
+    return len(values[0]) + ord(values[1][1])
+"""))
+        instructions = compile(module, Symbols(module), {}, {})
+        self.assertEqual(interpreter.Interpreter().run(instructions), 102)
 
     def test_compiler_runs_type_analysis_and_executes_inferred_locals(self):
         module = hr.ast_to_hr(ast.parse("""

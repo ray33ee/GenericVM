@@ -51,6 +51,38 @@ METHODS = {
 
 
 SOURCE = r'''
+def __gvm_int_str_is_space(value: int) -> bool:
+    return value == 32 or (value >= 9 and value <= 13)
+
+
+def __gvm_int_str(value: str) -> int:
+    length: int = len(value)
+    i: int = 0
+    while i < length and __gvm_int_str_is_space(ord(value[i])):
+        i = i + 1
+
+    negative: bool = False
+    if i < length and (value[i] == '+' or value[i] == '-'):
+        negative = value[i] == '-'
+        i = i + 1
+
+    digit_count: int = 0
+    result: int = 0
+    while i < length:
+        character: int = ord(value[i])
+        if character < 48 or character > 57:
+            break
+        result = result * 10 + character - 48
+        digit_count = digit_count + 1
+        i = i + 1
+
+    if digit_count == 0:
+        return 0
+    if negative:
+        result = -result
+    return result
+
+
 def __gvm_float_digits(value: float) -> str:
     digits: str = __gvm_str_alloc(8)
     i: int = 0
@@ -598,6 +630,12 @@ def required_functions(module: hr.Module) -> frozenset[str]:
         def visit_MethodCall(self, node):
             runtime = getattr(node, "resolved_method", None)
             if isinstance(runtime, str) and runtime.startswith("__gvm_"):
+                self.names.add(runtime)
+            self.generic_walk(node)
+
+        def visit_Subscript(self, node):
+            runtime = getattr(node, "resolved_runtime", None)
+            if runtime is not None:
                 self.names.add(runtime)
             self.generic_walk(node)
 

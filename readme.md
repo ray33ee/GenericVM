@@ -147,13 +147,38 @@ target = (
 `BuiltinKind.INSTRUCTION` is for immediate, constant-argument VM operations;
 `BuiltinKind.FUNCTION` is for operand-stack-based operations.
 
-The language intrinsic `input(length)` returns a newly allocated string. The
-compiler emits `Malloc` for `length + 1` words and then the native `Input`
-instruction (opcode `1005`) with the new character location and maximum length
-on the operand stack in `[location, maximum_length]` order. `Input` records the actual entered length immediately
-before the characters. The compiler preserves a separate copy of the allocated
-string pointer because the native instruction consumes both operands and does
-not push a result.
+Strings are two-word values in `[pointer, length]` order. The pointer addresses
+the first character directly; the heap contains character data only and has no
+hidden length header. `PrintString` consumes both words.
+
+String slicing supports `text[start:end]`, including omitted and negative
+bounds. Bounds are clamped using Python-style rules. Slice steps are not yet
+supported; `text[start:end:step]` is rejected during type checking.
+
+Lists are one-word references to stable heap descriptors containing
+`[data_pointer, length, capacity]`. The backing array is separate, so aliases
+remain valid when `append` or `insert` grows it. Capacity doubles when full
+(with a minimum allocation of four elements) and `pop` halves sparse backing
+arrays when their length falls to one quarter of capacity. `clear` releases the
+backing array. List slicing supports the same start/end forms as string slicing
+and returns an independent dynamic list. These operations lower to existing
+heap, stack, arithmetic, and branch instructions.
+
+An unannotated empty literal begins type analysis as `list[?]`. Element-adding
+operations such as `append` and `insert` constrain `?`; the constraint is shared
+through ordinary list aliases. Inference reports an error at completion if the
+unknown remains unresolved, and reports conflicting additions at their source.
+
+List printing is compositional: the compiler emits list punctuation and applies
+the normal typed printer to every element. Consequently any printable type also
+has printable lists, recursively, including classes with explicit `__str__` or
+`__repr__` methods and classes using the automatic field representation.
+
+The language intrinsic `input(length)` allocates `length` character words and
+then invokes the native `Input` instruction (opcode `1005`) with
+`[location, maximum_length]` on the operand stack. `Input` leaves the location in
+place, writes the entered characters, and replaces the maximum length with the
+actual entered length, producing the normal `[pointer, length]` string directly.
 
 The low-level memory intrinsics `malloc(size)` and `free(location)` lower
 directly to the native `Malloc` and `Free` instructions. `malloc` returns a
@@ -163,22 +188,32 @@ Pointer arithmetic is word-based: `ptr + int`, `int + ptr`, and `ptr - int`
 produce pointers, while subtracting two pointers produces their integer word
 distance.
 
-`cast_str(location)` is a compiler-only pointer cast from `ptr` to `str`. It
-emits no conversion instruction and performs no validation or allocation; the
-integer must already point to the first character of a valid GenericVM string,
-with its length stored at `location - 1`.
+`cast_str(location, length)` constructs a string value from a pointer and an
+integer length. It emits no conversion instruction and performs no validation
+or allocation.
 
-`cast_int(text)` exposes a string pointer as an `int` without emitting a VM
-instruction.
+`cast_int(text)` exposes the pointer word of a string as an `int` without
+emitting a VM instruction.
 
-`cast_ptr(text)` casts a `str` back to its underlying `ptr`, also without
-emitting a VM instruction. Together, `cast_str(ptr)` and `cast_ptr(str)` are
+`cast_ptr(text)` extracts a string's underlying `ptr`, also without emitting a
+VM instruction. Together, `cast_str(ptr, len)` and `cast_ptr(str)` are
 the direct pointer/string casts.
+
+For low-level runtime code, `cast_int(ptr)` and `cast_ptr(int)` also reinterpret
+raw pointer words without emitting conversion instructions.
 
 `bool` is implicitly usable wherever an `int` is expected. Mixed integer and
 boolean arithmetic and bitwise operations produce `int`; no conversion
 instruction is emitted. This conversion is one-way, so an arbitrary `int`
 cannot be used where `bool` is required.
+
+The explicit `int()` and `bool()` conversions support the `int`, `bool`, and
+`str` primitives. `int(str)` follows base-10 `strtol`-style parsing: it skips
+leading ASCII whitespace, accepts an optional sign, consumes digits up to the
+first non-digit, and returns zero if it consumes no digits. `bool(int)` tests
+against zero, and `bool(str)` tests whether the string length is nonzero. These
+conversions are composed from existing instructions and source-level runtime
+functions; no conversion-specific core VM instruction is required.
 
 ## Interpreter support and bytecode support
 
@@ -202,3 +237,37 @@ target = (
 GenericVM does not choose new opcode numbers.  Duplicate, negative, and
 non-integer opcode declarations are rejected, and bytecode generation raises
 an error instead of silently dropping an instruction with no encoding.
+# Iteration
+
+`for` loops support `range`, strings, typed lists, and user-defined iterable
+classes. Range, string, and list loops keep their iteration state directly on
+the VM operand stack; they do not allocate iterator wrapper objects. This is
+compiler lowering composed from the existing VM instruction set.
+
+User-defined iterables use the following protocol:
+
+```python
+class Counter:
+    def __iter__(self) -> Counter:
+        return self
+
+    def __bool__(self) -> bool:
+        return self.current < self.stop
+
+    def __next__(self) -> int:
+        value: int = self.current
+        self.current = self.current + 1
+        return value
+```
+
+In GenericVM, iterator truthiness means that `__next__` may safely be called.
+This deliberately differs from Python's exception-based `StopIteration`
+protocol. A generated loop checks `__bool__` before every call to `__next__`.
+
+String iteration yields `char`; `list[T]` iteration yields `T`; and range
+iteration yields `int`. Loop `break`, `continue`, `return`, and `else` paths
+clean up their retained operand-stack state, including in nested loops.
+
+Built-in list and string iteration is currently available through `for`.
+First-class `iter(list_value)` and `iter(string_value)` objects are not yet
+provided.

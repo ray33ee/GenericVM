@@ -45,6 +45,12 @@ class InstructionSetBuilderTests(unittest.TestCase):
         self.assertTrue(any(isinstance(item, ir.Malloc) for item in result))
         self.assertTrue(any(isinstance(item, ir.Input) for item in result))
         self.assertEqual(sum(isinstance(item, ir.Roll) for item in result), 1)
+        input_index = next(
+            index for index, item in enumerate(result) if isinstance(item, ir.Input)
+        )
+        self.assertIsInstance(result[input_index - 1], ir.Roll)
+        self.assertEqual(result[input_index - 1].depth, 1)
+        self.assertIsInstance(result[input_index - 2], ir.Malloc)
         self.assertFalse(any(isinstance(item, ir.BuiltInFunction) for item in result))
         self.assertIn((1005, 0), bytecode(result, instruction_set=target))
         output = StringIO()
@@ -111,7 +117,7 @@ class InstructionSetBuilderTests(unittest.TestCase):
     def test_string_and_pointer_casts_are_instruction_free(self):
         target = interpreter.Interpreter.INSTRUCTION_SET
         result = compile_source(
-            "main()\n\ndef main():\n    text: str = \"ok\"\n    p: ptr = cast_ptr(text)\n    same_text: str = cast_str(p)\n    print(same_text)\n",
+            "main()\n\ndef main():\n    text: str = \"ok\"\n    p: ptr = cast_ptr(text)\n    same_text: str = cast_str(p, 2)\n    print(same_text)\n",
             instruction_set=target,
         )
 
@@ -124,7 +130,7 @@ class InstructionSetBuilderTests(unittest.TestCase):
     def test_cast_str_changes_only_the_compiler_type(self):
         target = interpreter.Interpreter.INSTRUCTION_SET
         result = compile_source(
-            "main()\n\ndef main():\n    location: ptr = malloc(10)\n    text: str = cast_str(location)\n    print(text)\n",
+            "main()\n\ndef main():\n    location: ptr = malloc(10)\n    text: str = cast_str(location, 0)\n    print(text)\n",
             instruction_set=target,
         )
 
@@ -133,7 +139,7 @@ class InstructionSetBuilderTests(unittest.TestCase):
             index for index, item in enumerate(operations)
             if isinstance(item, ir.OpStackPushLocal)
         )
-        self.assertIsInstance(operations[push_location + 1], ir.OpStackPopLocal)
+        self.assertTrue(any(isinstance(item, ir.OpStackPopLocal) for item in operations[push_location + 1:]))
         self.assertFalse(any(type(item).__name__.startswith("Cast") for item in operations))
 
     def test_cast_int_returns_the_unchanged_string_pointer(self):
@@ -148,7 +154,8 @@ class InstructionSetBuilderTests(unittest.TestCase):
             index for index, item in enumerate(operations)
             if isinstance(item, ir.OpStackPushLocal)
         )
-        self.assertIsInstance(operations[push_text + 1], ir.OpStackPopLocal)
+        self.assertIsInstance(operations[push_text + 1], ir.OpStackPushLocal)
+        self.assertTrue(any(isinstance(item, ir.Drop) for item in operations[push_text + 2:]))
         self.assertFalse(any(type(item).__name__.startswith("Cast") for item in operations))
 
     def test_complete_set_can_be_built(self):

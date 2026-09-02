@@ -139,27 +139,21 @@ class ExtractVariables(hr.Walker):
                 )
 
     def visit_For(self, node):
-        for value in (node.start, node.end, node.step):
-            if isinstance(value, hr.HRNode):
-                self.walk(value)
-
-        if isinstance(node.assignable, hr.Name):
-            if node.assignable.id not in self.declared:
-                self.declared[node.assignable.id] = Symbol(
-                    node.assignable.id,
-                    None,
-                    self.is_top_level,
-                    False,
-                    self.global_offset if self.is_top_level else self.local_offset,
-                )
-                if self.is_top_level:
-                    self.global_offset += 1
-                else:
-                    self.local_offset += 1
-        else:
-            self.walk(node.assignable)
-
+        self.walk(node.iterable)
+        if node.target.id not in self.declared:
+            self.declared[node.target.id] = Symbol(
+                node.target.id,
+                None,
+                self.is_top_level,
+                False,
+                self.global_offset if self.is_top_level else self.local_offset,
+            )
+            if self.is_top_level:
+                self.global_offset += 1
+            else:
+                self.local_offset += 1
         self.traverse(node.body)
+        self.traverse(node.orelse)
 
     def results(self):
         return self.declared

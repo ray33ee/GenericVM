@@ -17,6 +17,8 @@ from typesystem import (
     ListType,
     TupleType,
     Type,
+    UNKNOWN,
+    contains_unknown,
 )
 
 
@@ -320,11 +322,33 @@ class SignatureInferer:
                 returns.extend(self._scan_block(statement.body, dict(environment), caller))
                 returns.extend(self._scan_block(statement.orelse or [], dict(environment), caller))
             elif isinstance(statement, hr.For):
-                environment[statement.assignable.id] = INT
-                for value in (statement.start, statement.end, statement.step):
-                    if isinstance(value, hr.Expression):
-                        self._infer_expression(value, environment, caller)
+                if isinstance(statement.iterable, hr.Call) and statement.iterable.func == "range":
+                    for argument in statement.iterable.args:
+                        self._infer_expression(argument, environment, caller, INT)
+                    element_type = INT
+                else:
+                    iterable_type = self._infer_expression(statement.iterable, environment, caller)
+                    if iterable_type == STR:
+                        element_type = CHAR
+                    elif isinstance(iterable_type, ListType):
+                        element_type = iterable_type.element_type
+                    elif isinstance(iterable_type, ClassType):
+                        iterable_info = self.symbols.classes.get(iterable_type.name)
+                        iter_method = iterable_info.methods.get("__iter__") if iterable_info else None
+                        iterator_type = iter_method.return_type if iter_method else None
+                        iterator_info = (
+                            self.symbols.classes.get(iterator_type.name)
+                            if isinstance(iterator_type, ClassType)
+                            else None
+                        )
+                        next_method = iterator_info.methods.get("__next__") if iterator_info else None
+                        element_type = next_method.return_type if next_method else None
+                    else:
+                        element_type = None
+                if element_type is not None:
+                    environment[statement.target.id] = element_type
                 returns.extend(self._scan_block(statement.body, dict(environment), caller))
+                returns.extend(self._scan_block(statement.orelse or [], dict(environment), caller))
             elif isinstance(statement, hr.Assert):
                 self._infer_expression(statement.test, environment, caller)
         return returns
@@ -349,7 +373,7 @@ class SignatureInferer:
         if isinstance(node, hr.List):
             expected_element = expected.element_type if isinstance(expected, ListType) else None
             if not node.elements:
-                return ListType(expected_element) if expected_element is not None else None
+                return ListType(expected_element if expected_element is not None else UNKNOWN)
             elements = [
                 self._infer_expression(item, environment, caller, expected_element)
                 for item in node.elements
@@ -391,6 +415,11 @@ class SignatureInferer:
 
         if isinstance(node, hr.Subscript):
             container = self._infer_expression(node.value, environment, caller)
+            if isinstance(node.slice, hr.Slice):
+                for bound in (node.slice.lower, node.slice.upper, node.slice.step):
+                    if bound is not None:
+                        self._infer_expression(bound, environment, caller, INT)
+                return STR if container == STR and node.slice.step is None else None
             self._infer_expression(node.slice, environment, caller, INT)
             if isinstance(container, ListType):
                 return container.element_type
@@ -502,6 +531,27 @@ class SignatureInferer:
                 ):
                     self._infer_expression(argument, environment, caller, parameter_type)
                 return string_runtime.METHODS[node.method][2]
+            if isinstance(receiver_type, ListType):
+                if node.method == "append" and node.args:
+                    expected_element = None if receiver_type.element_type == UNKNOWN else receiver_type.element_type
+                    actual = self._infer_expression(node.args[0], environment, caller, expected_element)
+                    if receiver_type.element_type == UNKNOWN and actual is not None and isinstance(node.receiver, hr.Name):
+                        environment[node.receiver.id] = ListType(actual)
+                    return NONE
+                if node.method == "insert" and len(node.args) >= 2:
+                    self._infer_expression(node.args[0], environment, caller, INT)
+                    expected_element = None if receiver_type.element_type == UNKNOWN else receiver_type.element_type
+                    actual = self._infer_expression(node.args[1], environment, caller, expected_element)
+                    if receiver_type.element_type == UNKNOWN and actual is not None and isinstance(node.receiver, hr.Name):
+                        environment[node.receiver.id] = ListType(actual)
+                    return NONE
+                if node.method == "pop":
+                    if node.args:
+                        self._infer_expression(node.args[0], environment, caller, INT)
+                    return receiver_type.element_type
+                if node.method == "clear":
+                    return NONE
+                return None
             if not isinstance(receiver_type, ClassType):
                 return None
             class_info = self.symbols.classes.get(receiver_type.name)
@@ -514,10 +564,13 @@ class SignatureInferer:
         return None
 
     def _infer_call(self, node, environment, caller):
-        if node.func in {"cast_str", "cast_int", "cast_ptr"} and len(node.args) == 1:
-            source_type = PTR if node.func == "cast_str" else STR
-            self._infer_expression(node.args[0], environment, caller, source_type)
-            return {"cast_str": STR, "cast_int": INT, "cast_ptr": PTR}[node.func]
+        if node.func == "cast_str" and len(node.args) == 2:
+            self._infer_expression(node.args[0], environment, caller, PTR)
+            self._infer_expression(node.args[1], environment, caller, INT)
+            return STR
+        if node.func in {"cast_int", "cast_ptr"} and len(node.args) == 1:
+            self._infer_expression(node.args[0], environment, caller)
+            return {"cast_int": INT, "cast_ptr": PTR}[node.func]
         if node.func in {"malloc", "free"} and len(node.args) == 1:
             argument_type = INT if node.func == "malloc" else PTR
             self._infer_expression(node.args[0], environment, caller, argument_type)
@@ -545,6 +598,10 @@ class SignatureInferer:
             return class_info.type
         if node.func not in self.functions and node.func in DUNDER_BUILTINS and len(node.args) == 1:
             receiver_type = self._infer_expression(node.args[0], environment, caller)
+            if node.func == "int" and receiver_type in {INT, BOOL, STR}:
+                return INT
+            if node.func == "bool" and receiver_type in {INT, BOOL, STR}:
+                return BOOL
             if node.func == "str" and receiver_type in {INT, FLOAT, BOOL, CHAR, STR}:
                 return STR
             if node.func == "str" and receiver_type == CHAR:
@@ -712,11 +769,17 @@ class SignatureInferer:
 
     def _constrain_parameter(self, function, index, actual_type, call, external):
         argument = function.args[index]
+        if contains_unknown(actual_type):
+            return
         if argument.annotation is None:
             argument.annotation = actual_type
             symbol = self.symbols.functions[function.name][0][argument.name]
             symbol.type = actual_type
             self.anchored_parameters.add((function.name, index))
+            self.changed = True
+        elif contains_unknown(argument.annotation):
+            argument.annotation = actual_type
+            self.symbols.functions[function.name][0][argument.name].type = actual_type
             self.changed = True
         elif (
             not self.explicit_parameters[(function.name, index)]
@@ -746,6 +809,10 @@ class SignatureInferer:
                 self.changed = True
 
     def _merge_return_types(self, function, left, right):
+        if contains_unknown(left):
+            return right
+        if contains_unknown(right):
+            return left
         if left == right:
             return left
         if {left, right} == {INT, FLOAT}:
@@ -823,12 +890,12 @@ class SignatureInferer:
     def _require_complete_signatures(self):
         for function in self.functions.values():
             for argument in function.args:
-                if argument.annotation is None:
+                if argument.annotation is None or contains_unknown(argument.annotation):
                     raise SignatureInferenceError(
                         f"Cannot infer parameter '{argument.name}' of function "
                         f"'{function.name}' from an external call; add an annotation"
                     )
-            if function.return_type is None:
+            if function.return_type is None or contains_unknown(function.return_type):
                 raise SignatureInferenceError(
                     f"Cannot infer return type of function '{function.name}'; "
                     f"add an annotation or a concrete return value"
@@ -836,12 +903,12 @@ class SignatureInferer:
         for class_info in self.symbols.classes.values():
             for method in class_info.methods.values():
                 for argument in method.args:
-                    if argument.annotation is None:
+                    if argument.annotation is None or contains_unknown(argument.annotation):
                         raise SignatureInferenceError(
                             f"Cannot infer parameter '{argument.name}' of method "
                             f"'{method.qualified_name}' from a call; add an annotation"
                         )
-                if method.return_type is None:
+                if method.return_type is None or contains_unknown(method.return_type):
                     raise SignatureInferenceError(
                         f"Cannot infer return type of method '{method.qualified_name}'; "
                         f"add an annotation or a concrete return value"

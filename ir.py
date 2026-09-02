@@ -343,7 +343,7 @@ class PrintInt(Instruction):
 
 
 class PrintString(Instruction):
-    """Print one heap string."""
+    """Consume a string as ``[pointer, length]`` and print its characters."""
 
     OPCODE = 163
 
@@ -391,7 +391,7 @@ class Free(Instruction):
 
 
 class Input(Instruction):
-    """Consume stack operands [location, maximum_length] and fill the string buffer."""
+    """Replace [location, maximum_length] with [location, actual_length]."""
 
     OPCODE = 1005
 

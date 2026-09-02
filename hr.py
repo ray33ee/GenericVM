@@ -159,18 +159,20 @@ class HRConstructor(ast.NodeVisitor):
         if len(node.args.kwonlyargs) != 0:
             raise Exception(f"KW only args not allowed (line: {node.lineno})")
 
-        if len(node.args.defaults) != 0:
-            raise Exception(f"Default arguments not yet supported (line: {node.lineno})")
-
         args: list[Argument] = []
 
-        for a in node.args.args:
+        default_offset = len(node.args.args) - len(node.args.defaults)
+
+        for index, a in enumerate(node.args.args):
 
             if a.annotation is None:
                 annotation = None
             else:
                 annotation = parse_annotation(a.annotation)
-            args.append(Argument(node.lineno, a.arg, annotation))
+            default = None
+            if index >= default_offset:
+                default = self.traverse(node.args.defaults[index - default_offset])
+            args.append(Argument(node.lineno, a.arg, annotation, default))
 
         return_annotation = parse_annotation(node.returns) if node.returns is not None else None
 
@@ -202,30 +204,15 @@ class HRConstructor(ast.NodeVisitor):
         return Assign(node.lineno, self.traverse(node.target), self.traverse(node.value), annotation)
 
     def visit_For(self, node):
-
-        if type(node.target) is not ast.Name and type(node.target) is not ast.Subscript:
-            raise Exception(f"Counter of For loops must be either a named variable or a subscripted variable (line: {node.lineno})")
-
-        if type(node.iter) is not ast.Call:
-            raise Exception(f"Loop iterator MUST be range(stop) or range(start, stop[, step])")
-
-        args = node.iter.args
-
-        start = 0
-        stop = None
-        step = 1
-
-        if len(args) == 1:
-            stop = self.traverse(args[0])
-        elif len(args) == 2:
-            start = self.traverse(args[0])
-            stop = self.traverse(args[1])
-        elif len(args) == 3:
-            start = self.traverse(args[0])
-            stop = self.traverse(args[1])
-            step = self.traverse(args[2])
-
-        return For(node.lineno, self.traverse(node.target), start, stop, step, self.traverse(node.body))
+        if type(node.target) is not ast.Name:
+            raise Exception(f"Target of a for loop must be a named variable (line: {node.lineno})")
+        return For(
+            node.lineno,
+            self.traverse(node.target),
+            self.traverse(node.iter),
+            self.traverse(node.body),
+            self.traverse(node.orelse),
+        )
 
 
     def visit_While(self, node):
@@ -282,6 +269,8 @@ class HRConstructor(ast.NodeVisitor):
         return BinOp(node.lineno, self.traverse(node.left), node.ops[0], self.traverse(node.comparators[0]))
 
     def visit_Call(self, node):
+        if node.keywords:
+            raise Exception(f"Keyword arguments are not supported (line: {node.lineno})")
         if isinstance(node.func, ast.Attribute):
             return MethodCall(
                 node.lineno,
@@ -332,6 +321,14 @@ class HRConstructor(ast.NodeVisitor):
 
         return Subscript(node.lineno, self.traverse(node.value), self.traverse(node.slice), node.ctx)
 
+    def visit_Slice(self, node):
+        return Slice(
+            node.lineno,
+            self.traverse(node.lower) if node.lower is not None else None,
+            self.traverse(node.upper) if node.upper is not None else None,
+            self.traverse(node.step) if node.step is not None else None,
+        )
+
     def visit_Name(self, node):
         return Name(node.lineno, node.id)
 
@@ -347,10 +344,11 @@ class HRConstructor(ast.NodeVisitor):
 
 
 class Argument(HRNode):
-    def __init__(self, lineno: int, name: str, annotation: Type | None):
+    def __init__(self, lineno: int, name: str, annotation: Type | None, default: Expression | None = None):
         self.lineno = lineno
         self.name = name
         self.annotation = annotation
+        self.default = default
 
 class FunctionDef(HRNode):
     def __init__(self, lineno: int, name: str, args: list[Argument], body: list[Statement], return_type: Type | None):
@@ -489,6 +487,20 @@ class Subscript(Expression):
         self.context = context
 
 
+class Slice(HRNode):
+    def __init__(
+        self,
+        lineno: int,
+        lower: Expression | None,
+        upper: Expression | None,
+        step: Expression | None,
+    ):
+        self.lineno = lineno
+        self.lower = lower
+        self.upper = upper
+        self.step = step
+
+
 class Return(Statement):
     def __init__(self, lineno: int, value: Expression | None):
         self.lineno = lineno
@@ -504,13 +516,12 @@ class Assign(Statement):
 
 
 class For(Statement):
-    def __init__(self, lineno: int, assignable: Name | Subscript, start: int, end: int, step: int, body: list[Statement]):
+    def __init__(self, lineno: int, target: Name, iterable: Expression, body: list[Statement], orelse: list[Statement] | None):
         self.lineno = lineno
-        self.assignable = assignable
-        self.start = start
-        self.end = end
-        self.step = step
+        self.target = target
+        self.iterable = iterable
         self.body = body
+        self.orelse = orelse
 
 class While(Statement):
     def __init__(self, lineno: int, condition: Expression, body: list[Statement], orelse: list[Statement] | None):
