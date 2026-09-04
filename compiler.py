@@ -6,6 +6,7 @@ from itertools import count
 import ir
 import hr
 import ast
+import re
 import list_runtime
 import string_runtime
 from instruction_set import (
@@ -392,6 +393,16 @@ class _Compiler(hr.Walker):
         self.emit_builtin("prints")
 
     def visit_MethodCall(self, node):
+        if hasattr(node, "contains_element_type"):
+            self.emit_list_contains(node)
+            return
+        if getattr(node, "contains_char", False):
+            self.emit_char_string(node.args[0])
+            self.emit_value_to_call_stack(STR)
+            self.traverse(node.receiver)
+            self.emit_value_to_call_stack(STR)
+            self.instructions.append(ir.Call(node.resolved_method))
+            return
         if hasattr(node, "resolved_list_method"):
             arguments = list(node.args)
             if node.method == "pop" and not arguments:
@@ -412,6 +423,55 @@ class _Compiler(hr.Walker):
         self.traverse(node.receiver)
         self.emit_value_to_call_stack(node.receiver.type)
         self.instructions.append(ir.Call(node.resolved_method))
+
+    def emit_list_contains(self, node):
+        """Keep [needle, descriptor, index] on the stack while searching."""
+        width = word_count(node.contains_element_type)
+        self.traverse(node.args[0])
+        self.traverse(node.receiver)
+        self.instructions.append(ir.OpStackPushLiteral(0))
+        condition = len(self.instructions)
+        self.instructions.append(ir.Dupe())
+        self.emit_dupe_at_depth(2)
+        for instruction in [ir.OpStackPushLiteral(1), ir.IAdd(), ir.Load(), ir.LessThan()]:
+            self.instructions.append(instruction)
+        exhausted = ir.JumpIfFalse(None)
+        self.instructions.append(exhausted)
+        # Copy the needle, then load the current element, for equality.
+        for _ in range(width):
+            self.emit_dupe_at_depth(width + 1)
+        self.emit_dupe_at_depth(width + 1)
+        self.instructions.append(ir.Load())
+        self.emit_dupe_at_depth(width + 1)
+        for instruction in [ir.OpStackPushLiteral(width), ir.IMultiply(), ir.IAdd()]:
+            self.instructions.append(instruction)
+        self.emit_load_words(width)
+        comparison = node.contains_comparison
+        if node.contains_element_type == STR or hasattr(comparison, "resolved_method"):
+            if hasattr(comparison, "resolved_method"):
+                self.instructions.append(ir.Roll(1))
+            self.emit_value_to_call_stack(node.contains_element_type)
+            self.emit_value_to_call_stack(node.contains_element_type)
+            method = getattr(comparison, "resolved_method", "__gvm_str_compare")
+            self.instructions.append(ir.Call(method))
+            if node.contains_element_type == STR:
+                for instruction in [ir.OpStackPushLiteral(0), ir.Equal()]:
+                    self.instructions.append(instruction)
+        else:
+            self.instructions.append(ir.Equal())
+        next_item = ir.JumpIfFalse(None)
+        self.instructions.append(next_item)
+        for instruction in [ir.Drop(width + 2), ir.OpStackPushLiteral(1)]:
+            self.instructions.append(instruction)
+        done = ir.Jump(None)
+        self.instructions.append(done)
+        next_item.location = len(self.instructions)
+        for instruction in [ir.OpStackPushLiteral(1), ir.IAdd(), ir.Jump(condition)]:
+            self.instructions.append(instruction)
+        exhausted.location = len(self.instructions)
+        for instruction in [ir.Drop(width + 2), ir.OpStackPushLiteral(0)]:
+            self.instructions.append(instruction)
+        done.location = len(self.instructions)
 
     def visit_Attribute(self, node):
         self.traverse(node.value)
@@ -999,11 +1059,14 @@ class _Compiler(hr.Walker):
 
     def visit_List(self, node):
         element_width = word_count(node.type.element_type)
+        capacity = 10
+        while capacity < len(node.elements):
+            capacity *= 2
         # Allocate the stable [data pointer, length, capacity] descriptor.
         self.instructions.append(ir.OpStackPushLiteral(3))
         self.instructions.append(ir.Malloc())
         self.instructions.append(ir.Dupe())
-        self.instructions.append(ir.OpStackPushLiteral(len(node.elements) * element_width))
+        self.instructions.append(ir.OpStackPushLiteral(capacity * element_width))
         self.instructions.append(ir.Malloc())
         self.instructions.append(ir.Store())
 
@@ -1025,7 +1088,7 @@ class _Compiler(hr.Walker):
         self.instructions.append(ir.Dupe())
         self.instructions.append(ir.OpStackPushLiteral(2))
         self.instructions.append(ir.IAdd())
-        self.instructions.append(ir.OpStackPushLiteral(len(node.elements)))
+        self.instructions.append(ir.OpStackPushLiteral(capacity))
         self.instructions.append(ir.Store())
 
     def visit_Tuple(self, node):
@@ -1330,10 +1393,21 @@ def compile_source(
     extra_functions: dict | None = None,
 ):
     """Parse, analyse, compile, and target-check source with rich locations."""
-    python_ast = ast.parse(source, filename)
-    module = hr.ast_to_hr(python_ast, source=source, filename=filename)
-    table = Symbols(module)
-    return compile(
-        module, table, extra_instructions, extra_functions,
-        instruction_set=instruction_set,
-    )
+    try:
+        python_ast = ast.parse(source, filename)
+        module = hr.ast_to_hr(python_ast, source=source, filename=filename)
+        table = Symbols(module)
+        return compile(
+            module, table, extra_instructions, extra_functions,
+            instruction_set=instruction_set,
+        )
+    except Exception as error:
+        # Enrich legacy line-number diagnostics without changing their type or
+        # traceback. Syntax and target errors already carry source context.
+        match = re.search(r"\(line: (\d+)\)$", str(error))
+        if match and len(error.args) == 1:
+            lines = source.splitlines()
+            index = int(match.group(1)) - 1
+            if 0 <= index < len(lines):
+                error.args = (f"{error}\n{lines[index]}",)
+        raise

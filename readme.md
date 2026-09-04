@@ -157,12 +157,20 @@ supported; `text[start:end:step]` is rejected during type checking.
 
 Lists are one-word references to stable heap descriptors containing
 `[data_pointer, length, capacity]`. The backing array is separate, so aliases
-remain valid when `append` or `insert` grows it. Capacity doubles when full
-(with a minimum allocation of four elements) and `pop` halves sparse backing
-arrays when their length falls to one quarter of capacity. `clear` releases the
-backing array. List slicing supports the same start/end forms as string slicing
+remain valid when `append` or `insert` grows it. Capacity starts at ten elements
+and doubles when full; larger literals and slices use the first doubled capacity
+that fits their contents. Backing allocations reserve capacity times element
+width words. `pop` and `clear` retain capacity for reuse. List slicing supports the same start/end forms as string slicing
 and returns an independent dynamic list. These operations lower to existing
 heap, stack, arithmetic, and branch instructions.
+
+Membership `value in container` calls `container.__contains__(value)`;
+`not in` negates that boolean result. Classes can define `__contains__` with
+one explicit argument and a `bool` return type. Strings accept a character or
+substring. Lists search using element equality, including string contents and
+class `__eq__` methods, stopping at the first match. List element types must
+support `==`; nested-list equality is not currently supported. Explicit
+`.__contains__(value)` calls use the same behavior and type checks.
 
 An unannotated empty literal begins type analysis as `list[?]`. Element-adding
 operations such as `append` and `insert` constrain `?`; the constraint is shared

@@ -375,6 +375,10 @@ class TypeChecker(hr.Walker):
         return result
 
     def resolve_provisional_list(self, receiver, element_type):
+        if isinstance(receiver, hr.Subscript) and isinstance(receiver.slice, hr.Slice):
+            self.resolve_provisional_list(receiver.value, element_type)
+            self.infer(receiver)
+            return
         if not isinstance(receiver, hr.Name):
             self.error(receiver, "An untyped empty list must be stored in a name before mutation")
         symbol = self.symbol(receiver)
@@ -473,10 +477,10 @@ class TypeChecker(hr.Walker):
     def visit_Call(self, node, expected=None):
         if node.func == "cast_str":
             if len(node.args) != 2:
-                self.error(node, "cast_str expects a pointer and length")
-            for argument, required in zip(node.args, (PTR, INT)):
+                self.error(node, "cast_str expects exactly two arguments: a pointer and an integer length")
+            for argument, required, role in zip(node.args, (PTR, INT), ("pointer", "length")):
                 actual = self.infer(argument, required)
-                self.require(argument, actual, required, f"cast_str argument must be {required}")
+                self.require(argument, actual, required, f"cast_str {role} argument")
             result_type = STR
             node.resolved_intrinsic = node.func
             node.expanded_argument_count = 2
@@ -841,10 +845,22 @@ class TypeChecker(hr.Walker):
         return self.set_type(node, class_info.fields[node.attr].type)
 
     def visit_MethodCall(self, node, expected=None):
-        receiver_type = self.infer(node.receiver)
+        if node.method == "__contains__" and len(node.args) != 1:
+            self.error(node, "__contains__ expects exactly one argument")
+        if node.method == "__contains__" and isinstance(node.receiver, hr.List) and not node.receiver.elements:
+            receiver_type = self.infer(node.receiver, ListType(self.infer(node.args[0])))
+        else:
+            receiver_type = self.infer(node.receiver)
         if receiver_type == CHAR and isinstance(node.receiver, hr.Constant):
             receiver_type = self.infer(node.receiver, STR)
         if receiver_type == STR:
+            if node.method == "__contains__":
+                actual = self.infer(node.args[0], STR)
+                if actual not in {STR, CHAR}:
+                    self.error(node, "String membership requires a char or str")
+                node.contains_char = actual == CHAR
+                node.resolved_method = "__gvm_str_contains"
+                return self.set_type(node, BOOL)
             definition = string_runtime.METHODS.get(node.method)
             if definition is None:
                 self.error(node, f"String has no method '{node.method}'")
@@ -858,6 +874,22 @@ class TypeChecker(hr.Walker):
             return self.set_type(node, return_type)
         if isinstance(receiver_type, ListType):
             element_type = receiver_type.element_type
+            if node.method == "__contains__":
+                actual = self.infer(node.args[0], None if element_type == UNKNOWN else element_type)
+                if element_type == UNKNOWN:
+                    element_type = actual
+                    self.resolve_provisional_list(node.receiver, element_type)
+                self.require(node.args[0], actual, element_type, "Invalid list membership value")
+                # Validate against exactly the same equality rules as `==`.
+                comparison_receiver = node.receiver
+                if isinstance(node.receiver, hr.List) and not node.receiver.elements:
+                    comparison_receiver = hr.List(node.lineno, [node.args[0]])
+                item = hr.Subscript(node.lineno, comparison_receiver, hr.Constant(node.lineno, 0), ast.Load())
+                comparison = hr.BinOp(node.lineno, item, ast.Eq(), node.args[0])
+                self.require(node, self.infer(comparison), BOOL, "List membership equality must return bool")
+                node.contains_comparison = comparison
+                node.contains_element_type = element_type
+                return self.set_type(node, BOOL)
             if node.method == "append":
                 if len(node.args) != 1:
                     self.error(node, "list.append expects one argument")
@@ -919,6 +951,8 @@ class TypeChecker(hr.Walker):
         parameter_types = tuple(argument.annotation for argument in method.args[1:])
         self._check_expanded_arguments(node, node.args, parameter_types, method.qualified_name)
         node.resolved_method = method.qualified_name
+        if node.method == "__contains__":
+            self.require(node, method.return_type, BOOL, "__contains__ must return bool")
         return self.set_type(node, method.return_type)
 
     def visit_IfExpr(self, node, expected=None):

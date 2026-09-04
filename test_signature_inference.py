@@ -31,6 +31,37 @@ def function_named(module, name):
 
 
 class BasicSignatureInferenceTests(unittest.TestCase):
+    def test_cast_str_reports_invalid_arguments_before_downstream_inference(self):
+        cases = [
+            ("", "expects exactly two arguments"),
+            ("malloc(10)", "expects exactly two arguments"),
+            ("malloc(10), 2, 3", "expects exactly two arguments"),
+            ("42, 2", "pointer argument: expected ptr, found int"),
+            ('malloc(10), "two"', "length argument: expected int, found str"),
+        ]
+        for arguments, message in cases:
+            with self.subTest(arguments=arguments):
+                with self.assertRaisesRegex(SignatureInferenceError, message):
+                    analyse(f"""
+def from_hex(c):
+    return ord(c)
+main()
+def main():
+    password = cast_str({arguments})
+    return from_hex(password[0])
+""")
+
+    def test_cast_str_infers_character_parameter_from_pointer_and_length(self):
+        module, _ = analyse("""
+def from_hex(c):
+    return ord(c)
+main()
+def main():
+    password = cast_str(malloc(10), 2)
+    return from_hex(password[0])
+""")
+        self.assertEqual(function_named(module, "from_hex").args[0].annotation, CHAR)
+
     def test_unused_function_is_reported_before_signature_inference(self):
         with self.assertRaisesRegex(DeadCodeError, "Function 'unused' is never called"):
             analyse("""

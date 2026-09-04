@@ -71,6 +71,17 @@ class ExtractVariables(hr.Walker):
                 raise Exception(f"Variable {declared} is declared but never read")
 
 
+    def visit_Call(self, node):
+        # Calls to values use the ordinary bound-method protocol. Resolve names
+        # here, where lexical declarations are known, before signature inference.
+        if node.func in self.declared:
+            receiver = hr.Name(node.lineno, node.func)
+            node.__class__ = hr.MethodCall
+            del node.func
+            node.receiver = receiver
+            node.method = "__call__"
+        self.generic_walk(node)
+
     def visit_Name(self, node):
         if node.id not in self.declared:
             raise Exception(f"Variable '{node.id}' is used before it is declared (line: {node.lineno})")

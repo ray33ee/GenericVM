@@ -263,6 +263,11 @@ class HRConstructor(ast.NodeVisitor):
 
         operator = node.ops[0]
 
+        if isinstance(operator, (ast.In, ast.NotIn)):
+            call = MethodCall(node.lineno, self.traverse(node.comparators[0]),
+                              "__contains__", [self.traverse(node.left)])
+            return UnaryOp(node.lineno, call, ast.Not()) if isinstance(operator, ast.NotIn) else call
+
         if type(operator) is ast.Is or type(operator) is ast.IsNot:
             raise Exception(f"'is' operator not allowed. (line: {node.lineno})")
 
@@ -279,7 +284,7 @@ class HRConstructor(ast.NodeVisitor):
                 self.traverse(node.args),
             )
         if type(node.func) is not ast.Name:
-            raise Exception(f"Can only call named functions or methods. (line: {node.lineno})")
+            return MethodCall(node.lineno, self.traverse(node.func), "__call__", self.traverse(node.args))
 
         return Call(node.lineno, node.func.id, self.traverse(node.args))
 

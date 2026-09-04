@@ -14,6 +14,7 @@ from typesystem import BOOL, CHAR, INT, STR, ListType
 PREFIX = "__gvm_str_"
 
 METHODS = {
+    "__contains__": ("contains", (STR,), BOOL),
     "substr": ("slice", (INT, INT), STR),
     "find": ("find", (STR,), INT),
     "rfind": ("rfind", (STR,), INT),
@@ -51,6 +52,9 @@ METHODS = {
 
 
 SOURCE = r'''
+def __gvm_str_contains(text: str, sub: str) -> bool:
+    return __gvm_str_find(text, sub) != -1
+
 def __gvm_int_str_is_space(value: int) -> bool:
     return value == 32 or (value >= 9 and value <= 13)
 

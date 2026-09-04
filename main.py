@@ -6,27 +6,121 @@ from bytecode import bytecode
 
 SOURCE = """
 
+class PRNG:
+    def __init__(self, s):
+        self.seed = 0x6D2B79F5
+
+        for i in range(100):
+            self.seed += ord(s[i]) - i
+            self.seed += self.seed << 7
+            self.seed *= 0xC2B2AE35
+            self.seed ^= self.seed >> 9
+            self.seed += self.seed << 3
+
+    def __next__(self):
+        self.seed ^= self.seed << 13
+        self.seed ^= self.seed >> 17
+        self.seed *= 0x2C1B3C6D
+        self.seed ^= self.seed << 5
+
+        self.seed += 0x9E3779B9
+
+        return self.seed
+
+class Poly:
+    def __init__(self, coeffs):
+        self.coeffs = coeffs
+    
+    def __call__(self, x):
+        s = 0
+        for i in range(10):
+            s = (((s * x) % 65521) + self.coeffs[i]) % 65521
+        return s
+
+def from_hex(c):
+    return (ord(c) & 0x0F) + (ord(c) >= ord('A')) * 9
 
 main()
 
 def main():
-    
-    
-    print("enter count")
-    
-    c = input(100)
-    
-    count = int(c)
-    
-    sum = 0
-    
-    
-    for i in range(count):
-        st = input(10)
-        sum += int(st)
-        sum = sum + i - i
-    
-    print(f"Sum: {sum}")
+    PRIME = 65521
+
+    #################### Get the username and password inputs
+    print("Enter username: ")
+    u = input(100)
+
+    print("Enter password: ")
+    k = input(100)
+
+    username = cast_str(cast_ptr(u), 100)
+    password = cast_str(cast_ptr(k), 100)
+
+    rng = PRNG(username)
+
+    x = []
+    y = []
+
+    poly = []
+
+    is_dashes = 1
+
+    #################### password string validations
+    for i in range(9):
+        is_dashes &= password[i*5+4] == "-"
+
+    is_hex = 1
+    i = 0
+    while i < 49:
+        is_hex &= (password[i] >= "0" and password[i] <= "9") or (password[i] >= "A" and password[i] <= "F")
+
+        i += 1
+
+        if i % 5 == 4:
+            i += 1
+
+    #################### Get 10 (x, y) pairs ensuring x is unique and x, y are mod PRIME
+    i = 0
+    while i < 10:
+        v = next(rng) % PRIME
+
+        if v in x:
+            continue
+
+        x.append(v)
+
+        y.append(next(rng) % PRIME)
+
+        i += 1
+
+    #################### Get password coeffs
+    for i in range(10):
+        ind = i * 5
+        c4 = from_hex(password[ind])
+        c3 = from_hex(password[ind+1])
+        c2 = from_hex(password[ind+2])
+        c1 = from_hex(password[ind+3])
+
+        coeff = c4 * 4096 + c3 * 256 + c2 * 16 + c1
+
+        poly.append(coeff)
+
+
+    fits = 1
+        
+    pp = Poly(poly)
+
+    #################### For each (x, y) check it lies in poly
+    for i in range(10):
+        fits &= pp(x[i]) == y[i]
+
+    yes = "yes\\n"
+    no = "no\\n"
+
+    if is_dashes == 1 and is_hex == 1 and len(k) == 49 and fits == 1:
+        print(yes)
+    else:
+        print(no)
+
 
 """
 

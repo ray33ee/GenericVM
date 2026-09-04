@@ -319,8 +319,8 @@ class SignatureInferer:
                 self._infer_expression(statement.expr, environment, caller)
             elif isinstance(statement, (hr.If, hr.While)):
                 self._infer_expression(statement.condition, environment, caller)
-                returns.extend(self._scan_block(statement.body, dict(environment), caller))
-                returns.extend(self._scan_block(statement.orelse or [], dict(environment), caller))
+                returns.extend(self._scan_nested_block(statement.body, environment, caller))
+                returns.extend(self._scan_nested_block(statement.orelse or [], environment, caller))
             elif isinstance(statement, hr.For):
                 if isinstance(statement.iterable, hr.Call) and statement.iterable.func == "range":
                     for argument in statement.iterable.args:
@@ -347,10 +347,21 @@ class SignatureInferer:
                         element_type = None
                 if element_type is not None:
                     environment[statement.target.id] = element_type
-                returns.extend(self._scan_block(statement.body, dict(environment), caller))
-                returns.extend(self._scan_block(statement.orelse or [], dict(environment), caller))
+                returns.extend(self._scan_nested_block(statement.body, environment, caller))
+                returns.extend(self._scan_nested_block(statement.orelse or [], environment, caller))
             elif isinstance(statement, hr.Assert):
                 self._infer_expression(statement.test, environment, caller)
+        return returns
+
+    def _scan_nested_block(self, statements, environment, caller):
+        nested = dict(environment)
+        returns = self._scan_block(statements, nested, caller)
+        # Element types constrain a list even when the block executes zero times.
+        # Keep ordinary variable bindings scoped as before.
+        for name, previous in environment.items():
+            inferred = nested.get(name)
+            if isinstance(previous, ListType) and contains_unknown(previous) and isinstance(inferred, ListType) and not contains_unknown(inferred):
+                environment[name] = inferred
         return returns
 
     def _infer_expression(self, node, environment, caller, expected=None):
@@ -419,12 +430,16 @@ class SignatureInferer:
                 for bound in (node.slice.lower, node.slice.upper, node.slice.step):
                     if bound is not None:
                         self._infer_expression(bound, environment, caller, INT)
-                return STR if container == STR and node.slice.step is None else None
+                if node.slice.step is None and (container == STR or isinstance(container, ListType)):
+                    return container
+                return None
             self._infer_expression(node.slice, environment, caller, INT)
             if isinstance(container, ListType):
                 return container.element_type
             if container == STR:
                 return CHAR
+            if container == PTR:
+                return INT
             if isinstance(container, TupleType):
                 index = self._integer_literal(node.slice)
                 if index is None:
@@ -525,6 +540,12 @@ class SignatureInferer:
 
         if isinstance(node, hr.MethodCall):
             receiver_type = self._infer_expression(node.receiver, environment, caller)
+            if isinstance(receiver_type, ClassType):
+                class_info = self.symbols.classes[receiver_type.name]
+                if node.method in class_info.fields:
+                    node.receiver = hr.Attribute(node.lineno, node.receiver, node.method, ast.Load())
+                    node.method = "__call__"
+                    receiver_type = self._infer_expression(node.receiver, environment, caller)
             if receiver_type in {STR, CHAR} and node.method in string_runtime.METHODS:
                 for argument, parameter_type in zip(
                     node.args, string_runtime.METHODS[node.method][1]
@@ -532,6 +553,13 @@ class SignatureInferer:
                     self._infer_expression(argument, environment, caller, parameter_type)
                 return string_runtime.METHODS[node.method][2]
             if isinstance(receiver_type, ListType):
+                if node.method == "__contains__" and node.args:
+                    element = receiver_type.element_type
+                    actual = self._infer_expression(node.args[0], environment, caller,
+                                                    None if element == UNKNOWN else element)
+                    if element == UNKNOWN and actual is not None and isinstance(node.receiver, hr.Name):
+                        environment[node.receiver.id] = ListType(actual)
+                    return BOOL
                 if node.method == "append" and node.args:
                     expected_element = None if receiver_type.element_type == UNKNOWN else receiver_type.element_type
                     actual = self._infer_expression(node.args[0], environment, caller, expected_element)
@@ -564,9 +592,22 @@ class SignatureInferer:
         return None
 
     def _infer_call(self, node, environment, caller):
-        if node.func == "cast_str" and len(node.args) == 2:
-            self._infer_expression(node.args[0], environment, caller, PTR)
-            self._infer_expression(node.args[1], environment, caller, INT)
+        if node.func == "cast_str":
+            if len(node.args) != 2:
+                raise SignatureInferenceError(
+                    f"cast_str expects exactly two arguments: a pointer and an integer length; "
+                    f"got {len(node.args)} (line: {node.lineno})"
+                )
+            for argument, required, role in zip(node.args, (PTR, INT), ("pointer", "length")):
+                actual = self._infer_expression(argument, environment, caller, required)
+                # Unresolved arguments may become known on a later inference pass.
+                if actual is None or contains_unknown(actual):
+                    continue
+                if actual != required and not (actual == BOOL and required == INT):
+                    raise SignatureInferenceError(
+                        f"cast_str {role} argument: expected {required}, found {actual} "
+                        f"(line: {node.lineno})"
+                    )
             return STR
         if node.func in {"cast_int", "cast_ptr"} and len(node.args) == 1:
             self._infer_expression(node.args[0], environment, caller)
@@ -692,7 +733,7 @@ class SignatureInferer:
                     and caller is not None
                     and self._method_expression_is_anchored(argument, caller)
                 )
-                if actual_type is not None and (external or anchored_internal):
+                if actual_type is not None and not contains_unknown(actual_type) and (external or anchored_internal):
                     if parameter.annotation is None:
                         parameter.annotation = actual_type
                         symbol = self.symbols.functions[method.qualified_name][0][parameter.name]

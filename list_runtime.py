@@ -11,13 +11,6 @@ import hr
 
 
 SOURCE = r'''
-def __gvm_list_half(value: int) -> int:
-    result: int = 0
-    while value >= 2:
-        value = value - 2
-        result = result + 1
-    return result
-
 def __gvm_list_resize_1(descriptor: ptr, new_capacity: int):
     old_data: ptr = cast_ptr(descriptor[0])
     new_data: ptr = malloc(new_capacity)
@@ -43,29 +36,15 @@ def __gvm_list_resize_2(descriptor: ptr, new_capacity: int):
 def __gvm_list_grow_1(descriptor: ptr):
     if descriptor[1] >= descriptor[2]:
         capacity: int = descriptor[2] * 2
-        if capacity < 4:
-            capacity = 4
+        if capacity < 10:
+            capacity = 10
         __gvm_list_resize_1(descriptor, capacity)
 
 def __gvm_list_grow_2(descriptor: ptr):
     if descriptor[1] >= descriptor[2]:
         capacity: int = descriptor[2] * 2
-        if capacity < 4:
-            capacity = 4
-        __gvm_list_resize_2(descriptor, capacity)
-
-def __gvm_list_shrink_1(descriptor: ptr):
-    if descriptor[2] > 4 and descriptor[1] * 4 <= descriptor[2]:
-        capacity: int = __gvm_list_half(descriptor[2])
-        if capacity < 4:
-            capacity = 4
-        __gvm_list_resize_1(descriptor, capacity)
-
-def __gvm_list_shrink_2(descriptor: ptr):
-    if descriptor[2] > 4 and descriptor[1] * 4 <= descriptor[2]:
-        capacity: int = __gvm_list_half(descriptor[2])
-        if capacity < 4:
-            capacity = 4
+        if capacity < 10:
+            capacity = 10
         __gvm_list_resize_2(descriptor, capacity)
 
 def __gvm_list_append_1(descriptor: ptr, word0: int):
@@ -130,7 +109,6 @@ def __gvm_list_pop_1(descriptor: ptr, index: int) -> int:
         data[i] = data[i + 1]
         i = i + 1
     descriptor[1] = length - 1
-    __gvm_list_shrink_1(descriptor)
     return result
 
 def __gvm_list_pop_2(descriptor: ptr, index: int) -> tuple[int, int]:
@@ -147,15 +125,16 @@ def __gvm_list_pop_2(descriptor: ptr, index: int) -> tuple[int, int]:
         data[i * 2 + 1] = data[(i + 1) * 2 + 1]
         i = i + 1
     descriptor[1] = length - 1
-    __gvm_list_shrink_2(descriptor)
     return (result0, result1)
 
 def __gvm_list_clear(descriptor: ptr):
-    old_data: ptr = cast_ptr(descriptor[0])
-    free(old_data)
-    descriptor[0] = cast_int(malloc(0))
     descriptor[1] = 0
-    descriptor[2] = 0
+
+def __gvm_list_initial_capacity(length: int) -> int:
+    capacity: int = 10
+    while capacity < length:
+        capacity = capacity * 2
+    return capacity
 
 def __gvm_list_slice_1(source: ptr, start: int, end: int) -> ptr:
     length: int = source[1]
@@ -173,7 +152,7 @@ def __gvm_list_slice_1(source: ptr, start: int, end: int) -> ptr:
         end = length
     result: ptr = malloc(3)
     result[1] = end - start
-    result[2] = end - start
+    result[2] = __gvm_list_initial_capacity(end - start)
     data: ptr = malloc(result[2])
     result[0] = cast_int(data)
     old_data: ptr = cast_ptr(source[0])
@@ -199,7 +178,7 @@ def __gvm_list_slice_2(source: ptr, start: int, end: int) -> ptr:
         end = length
     result: ptr = malloc(3)
     result[1] = end - start
-    result[2] = end - start
+    result[2] = __gvm_list_initial_capacity(end - start)
     data: ptr = malloc(result[2] * 2)
     result[0] = cast_int(data)
     old_data: ptr = cast_ptr(source[0])
