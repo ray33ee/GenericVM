@@ -72,7 +72,7 @@ class InstructionSetBuilderTests(unittest.TestCase):
         self.assertEqual(memory_operations, [ir.Malloc, ir.Free])
         self.assertIn((1006, 0), bytecode(result, instruction_set=target))
         self.assertIn((1007, 0), bytecode(result, instruction_set=target))
-        self.assertIsNone(interpreter.Interpreter().run(result))
+        self.assertEqual(interpreter.Interpreter().run(result), 0)
 
     def test_pointer_indexing_loads_and_stores_raw_words(self):
         target = interpreter.Interpreter.INSTRUCTION_SET
@@ -137,9 +137,12 @@ class InstructionSetBuilderTests(unittest.TestCase):
         operations = list(result)
         push_location = next(
             index for index, item in enumerate(operations)
-            if isinstance(item, ir.OpStackPushLocal)
+            if isinstance(item, ir.StackPushVariable) and item.offset > 0
         )
-        self.assertTrue(any(isinstance(item, ir.OpStackPopLocal) for item in operations[push_location + 1:]))
+        self.assertTrue(any(
+            isinstance(item, ir.StackPopVariable) and item.offset > 0
+            for item in operations[push_location + 1:]
+        ))
         self.assertFalse(any(type(item).__name__.startswith("Cast") for item in operations))
 
     def test_cast_int_returns_the_unchanged_string_pointer(self):
@@ -152,9 +155,9 @@ class InstructionSetBuilderTests(unittest.TestCase):
         operations = list(result)
         push_text = next(
             index for index, item in enumerate(operations)
-            if isinstance(item, ir.OpStackPushLocal)
+            if isinstance(item, ir.StackPushVariable) and item.offset > 0
         )
-        self.assertIsInstance(operations[push_text + 1], ir.OpStackPushLocal)
+        self.assertIsInstance(operations[push_text + 1], ir.StackPushVariable)
         self.assertTrue(any(isinstance(item, ir.Drop) for item in operations[push_text + 2:]))
         self.assertFalse(any(type(item).__name__.startswith("Cast") for item in operations))
 
@@ -296,7 +299,7 @@ result
 
     def test_interpreter_rejects_unsupported_program_before_execution(self):
         unsupported = CompilationResult(
-            [ir.OpStackPushLiteral(1), ir.Ternary()],
+            [ir.StackPushLiteral(1), ir.Ternary()],
             [None, None],
         )
         with self.assertRaises(UnsupportedInstructionError):

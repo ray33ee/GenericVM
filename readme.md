@@ -16,13 +16,24 @@ Users build the compiler by choosing their level of functionality, then they can
 
 If a main function is emabled, then all python-like code must contain a main function. the first instruction is to call main (or allocate space for globals) and after the call the EXIT function is used. If main feature is not selected, the code is translated in whatever order it appears, which could cause defined functions to execute out of order. Main can only be used if subroutines are selected. Rule of thumb is if subroutines are selected, so should a main function.
 
+`main` always produces one integer program-result word. An explicit return type
+or inferred return value must therefore be `int`, and a bare `return` is rejected.
+The compiler appends an implicit `return 0` only for fallthrough. This guarantees
+that the program result is the top word of the unified stack, even when globals
+remain allocated below it.
+
+If no `main` function is defined, the compiler instead appends a literal `0`
+after the module's top-level instructions, giving the program the same successful
+result without creating a synthetic function. Calling `main()` without defining
+it remains an unknown-function error, just like any other missing function.
+
 ## Unconditional jump (JMP)
 
 Simple branch to a particular label.
 
 ## Conditional jump (JT, JF)
 
-Conditional branch, takes the value at the top of the op stack and uses it to branch or not. Either integer or floating arithmetic must be supported to use conditional jumps
+Conditional branch, takes the value at the top of the unified stack and uses it to branch or not. Either integer or floating arithmetic must be supported to use conditional jumps.
 
 ## Integer arithmetic & comparison (ADD, SUB, etc.)
 
@@ -38,19 +49,76 @@ If floating and integer types are both selected, conversions between the two are
 
 If conditional jumps are used, BOOL is used to convert the operand to a boolean type.
 
+## Unified memory
+
+GenericVM defines one word-addressed memory space. The stack begins immediately
+above the highest address and grows downward: pushing decrements `SP` before
+writing `memory[SP]`, while popping reads `memory[SP]` before incrementing it.
+`LOAD` and `STORE` accept any valid address in this shared space. Allocation and
+release policies, including any heap pointer, remain target-VM implementation
+details; allocated pointers must nevertheless be addresses in this same space.
+The VM owns the memory size, so compiled programs remain independent of it.
+
 ## Subroutines (CALL, RET, ALLOC)
 
 Allows subroutines. Compiler will handle calling convention, arguments and local variables.
 
+The VM uses one unified stack for expression values and call frames. Before a
+call, the caller reserves one slot for each result word and then pushes the
+arguments. `CALL` pushes the link address and saved base pointer and establishes
+the new base pointer. `ALLOC` then pushes zero-initialized local words. A frame
+therefore has this layout:
+
+```text
+| caller values | return slots | arguments | link | saved BP | locals | evaluations |
+```
+
+The base pointer is the physical address of the saved-BP word.
+`StackPushVariable` and `StackPopVariable` access `memory[bp - offset]`. Local word `i` has
+offset `1 + i`; incoming argument word `i` has offset `-2 - i`; return slots
+continue below the arguments. Before `RET`, the compiler stores the result into
+those caller-owned slots. `RET` then pops locals, the saved base pointer, the
+link, and its immediate argument-word count. The completed result is
+consequently already at the top of the caller's stack. Multiword values use
+their normal flattened order, and `RET` still has only one immediate.
+
 If subroutines are disabled, functions can be used in the python=like code, but they will always be inlined
+
+### Guaranteed macros
+
+Decorating a module function with `@macro` requires every call to be expanded at
+compile time:
+
+```python
+@macro
+def add_one(value: int) -> int:
+    result: int = value + 1
+    return result
+```
+
+Macro calls use the same syntax and type checking as ordinary function calls.
+Each expansion has private compiler-allocated storage for its parameters and
+locals, so names cannot collide with the caller or with another expansion.
+Arguments are evaluated once using the language's normal call order, and
+`return` exits the expansion rather than the caller. Recursive macros are
+rejected. A macro never falls back to `CALL`, and its function body is not
+emitted as a callable subroutine. Ordinary instance methods can also be macros;
+their `self` parameter receives the same private storage as every other macro
+parameter. The `main` entry function may be a macro, in which case its entry
+call is expanded at top level and leaves the normal integer program result on
+the stack. Special methods such as `__init__` and `__add__` cannot be macros.
 
 ## Global variables
 
-Implemented at the top of the call stack via ALLOC 
+At the top level, the same `ALLOC` instruction reserves zero-initialized global
+words at the bottom of the unified stack without changing the base pointer.
+Global loads and stores use `StackPushGlobal` and `StackPopGlobal`, whose
+immediate is a logical index counted from the bottom. The VM maps it to physical
+address `memory_size - 1 - index`; the compiler does not need the memory size.
 
 ## Custom functions
 
-Since each VM is different, users will want to create custom functions specific to their tasks. In the python-like code they are called in the same way as subroutines, but they do not require the call stack (and if constants are used they do not require the operand stack either) and are implemented by the interpreter directly.
+Since each VM is different, users will want to create custom functions specific to their tasks. In the Python-like code they are called in the same way as subroutines but are implemented directly by the VM. Built-in functions consume arguments and produce results on the unified stack without creating a call frame.
 
 ## If expression
 
@@ -184,7 +252,7 @@ has printable lists, recursively, including classes with explicit `__str__` or
 
 The language intrinsic `input(length)` allocates `length` character words and
 then invokes the native `Input` instruction (opcode `1005`) with
-`[location, maximum_length]` on the operand stack. `Input` leaves the location in
+`[location, maximum_length]` on the unified stack. `Input` leaves the location in
 place, writes the entered characters, and replaces the maximum length with the
 actual entered length, producing the normal `[pointer, length]` string directly.
 
@@ -249,7 +317,7 @@ an error instead of silently dropping an instruction with no encoding.
 
 `for` loops support `range`, strings, typed lists, and user-defined iterable
 classes. Range, string, and list loops keep their iteration state directly on
-the VM operand stack; they do not allocate iterator wrapper objects. This is
+the unified VM stack; they do not allocate iterator wrapper objects. This is
 compiler lowering composed from the existing VM instruction set.
 
 User-defined iterables use the following protocol:

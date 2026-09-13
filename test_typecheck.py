@@ -211,14 +211,16 @@ def main() -> int:
         module = hr.ast_to_hr(ast.parse("""
 main()
 
-def main() -> float:
+def main() -> int:
     integer: int = 7
     floating: float = 0.5
-    return integer + floating
+    result: float = integer + floating
+    print(result)
+    return 0
 """))
         instructions = compile(module, Symbols(module), {}, {})
 
-        self.assertEqual(interpreter.Interpreter().run(instructions), 7.5)
+        self.assertEqual(interpreter.Interpreter().run(instructions), 0)
         self.assertEqual(sum(isinstance(item, ir.IntToFloat) for item in instructions), 1)
         self.assertEqual(sum(isinstance(item, ir.FAdd) for item in instructions), 1)
 
@@ -226,14 +228,16 @@ def main() -> float:
         module = hr.ast_to_hr(ast.parse("""
 main()
 
-def main() -> float:
+def main() -> int:
     integer: int = 3
     floating: float = 2.0
-    return -(integer * floating) - +1.0
+    result: float = -(integer * floating) - +1.0
+    print(result)
+    return 0
 """))
         instructions = compile(module, Symbols(module), {}, {})
 
-        self.assertEqual(interpreter.Interpreter().run(instructions), -7.0)
+        self.assertEqual(interpreter.Interpreter().run(instructions), 0)
         self.assertTrue(any(isinstance(item, ir.FMultiply) for item in instructions))
         self.assertTrue(any(isinstance(item, ir.FUnaryNegative) for item in instructions))
         self.assertTrue(any(isinstance(item, ir.FUnaryPositive) for item in instructions))

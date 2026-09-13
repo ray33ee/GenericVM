@@ -145,6 +145,15 @@ class HRConstructor(ast.NodeVisitor):
         return ClassDef(node.lineno, node.name, fields, methods)
 
     def visit_FunctionDef(self, node):
+        decorators = []
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Name):
+                raise Exception(f"Function decorators must be simple names (line: {decorator.lineno})")
+            if decorator.id != "macro":
+                raise Exception(f"Unsupported function decorator '@{decorator.id}' (line: {decorator.lineno})")
+            decorators.append(decorator.id)
+        if len(decorators) != len(set(decorators)):
+            raise Exception(f"Duplicate function decorator '@macro' (line: {node.lineno})")
         # Must contain a return annotation
 
         if node.args.kwarg is not None:
@@ -176,7 +185,9 @@ class HRConstructor(ast.NodeVisitor):
 
         return_annotation = parse_annotation(node.returns) if node.returns is not None else None
 
-        return FunctionDef(node.lineno, node.name, args, self.traverse(node.body), return_annotation)
+        function = FunctionDef(node.lineno, node.name, args, self.traverse(node.body), return_annotation)
+        function.is_macro = "macro" in decorators
+        return function
 
     def visit_Return(self, node):
 
@@ -220,9 +231,6 @@ class HRConstructor(ast.NodeVisitor):
 
     def visit_If(self, node):
         return If(node.lineno, self.traverse(node.test), self.traverse(node.body), self.traverse(node.orelse))
-
-    def visit_Assert(self, node):
-        return Assert(node.lineno, self.traverse(node.test))
 
     def visit_Expr(self, node):
         return Expr(node.lineno, self.traverse(node.value))
@@ -364,6 +372,7 @@ class FunctionDef(HRNode):
         self.return_type = return_type
         self.owner_class = None
         self.qualified_name = name
+        self.is_macro = False
 
 
 class FieldDef(HRNode):
@@ -541,11 +550,6 @@ class If(Statement):
         self.condition = condition
         self.body = body
         self.orelse = orelse
-
-class Assert(Statement):
-    def __init__(self, lineno: int, test: Expression):
-        self.lineno = lineno
-        self.test = test
 
 class Expr(Statement):
     def __init__(self, lineno: int, expr: Expression):

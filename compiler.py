@@ -1,4 +1,5 @@
 from itertools import count
+import copy
 
 # The compiler always performs normal lowering. A target InstructionSet is
 # checked afterward, alongside its stack-based and immediate built-ins.
@@ -15,7 +16,7 @@ from instruction_set import (
     InstructionSet,
     validate_instruction_set,
 )
-from symbols import Symbols
+from symbols import Symbol, Symbols
 from typecheck import check_types
 from typesystem import BOOL, CHAR, FLOAT, INT, NONE, PTR, STR, BuiltinSignature, ClassType, ListType, TupleType, word_count
 
@@ -34,6 +35,92 @@ class _InstructionBuffer(list):
         self.compiler.origins.append(InstructionOrigin(span, construct) if node else None)
 
 
+class _MacroPlan:
+    def __init__(self, body, bindings, parameters, implicit_return_zero=False):
+        self.body = body
+        self.bindings = bindings
+        self.parameters = parameters
+        self.implicit_return_zero = implicit_return_zero
+
+
+def _plan_macro_expansions(module, table):
+    """Reserve hygienic caller slots and attach a private plan to every macro call."""
+    serial = count()
+
+    for class_info in table.classes.values():
+        for method in class_info.methods.values():
+            if method.is_macro and method.name.startswith("__") and method.name.endswith("__"):
+                raise Exception(
+                    f"Special method '{method.qualified_name}' cannot be a macro "
+                    f"(line: {method.lineno})"
+                )
+
+    def make_plan(function_name, destination_symbols, destination_is_global, expansion_stack):
+        if function_name in expansion_stack:
+            chain = " -> ".join((*expansion_stack, function_name))
+            function = table.functions[function_name][1]
+            raise Exception(f"Recursive macro expansion is not allowed: {chain} (line: {function.lineno})")
+
+        source_symbols, function = table.functions[function_name]
+        invocation = next(serial)
+        bindings = {}
+        for name, source_symbol in source_symbols.items():
+            if source_symbol.is_global:
+                bindings[name] = source_symbol
+                continue
+            key = f"@macro:{invocation}:{function_name}:{name}"
+            symbol = Symbol(key, source_symbol.type, destination_is_global, False, 0)
+            symbol.type = source_symbol.type
+            symbol.word_width = word_count(source_symbol.type)
+            destination_symbols[key] = symbol
+            bindings[name] = symbol
+
+        body = copy.deepcopy(function.body)
+        scan(body, destination_symbols, destination_is_global, (*expansion_stack, function_name))
+        parameters = [bindings[argument.name] for argument in function.args]
+        return _MacroPlan(
+            body,
+            bindings,
+            parameters,
+            getattr(function, "implicit_return_zero", False),
+        )
+
+    def scan(value, destination_symbols, destination_is_global, expansion_stack=()):
+        if isinstance(value, list):
+            for item in value:
+                scan(item, destination_symbols, destination_is_global, expansion_stack)
+            return
+        if not isinstance(value, hr.HRNode):
+            return
+        if isinstance(value, hr.Call):
+            # Argument expressions execute in the caller and may themselves contain macros.
+            scan(value.args, destination_symbols, destination_is_global, expansion_stack)
+            target = table.functions.get(value.func)
+            if target is not None and target[1].is_macro:
+                value.macro_plan = make_plan(
+                    value.func, destination_symbols, destination_is_global, expansion_stack
+                )
+            return
+        if isinstance(value, hr.MethodCall):
+            scan(value.receiver, destination_symbols, destination_is_global, expansion_stack)
+            scan(value.args, destination_symbols, destination_is_global, expansion_stack)
+            target_name = getattr(value, "resolved_method", None)
+            target = table.functions.get(target_name)
+            if target is not None and target[1].is_macro:
+                value.macro_plan = make_plan(
+                    target_name, destination_symbols, destination_is_global, expansion_stack
+                )
+            return
+        for child in hr.filtered_vars(value).values():
+            scan(child, destination_symbols, destination_is_global, expansion_stack)
+
+    top_level_statements = [node for node in module.body if isinstance(node, hr.Statement)]
+    scan(top_level_statements, table.top_level, True)
+    for function_symbols, function in table.functions.values():
+        if not function.is_macro:
+            scan(function.body, function_symbols, False)
+
+
 class _Compiler(hr.Walker):
     def __init__(self, table: Symbols, built_in_instructions: dict, built_in_functions: dict):
         self.table = table
@@ -47,6 +134,8 @@ class _Compiler(hr.Walker):
         #todo: Make sure there are no conflicts between built in instructions, functions and user defined functions
         self.loop_contexts = []
         self.runtime_functions = frozenset()
+        self.macro_bindings = []
+        self.macro_returns = []
 
     @staticmethod
     def construct_name(node):
@@ -68,7 +157,6 @@ class _Compiler(hr.Walker):
             hr.While: "while loop",
             hr.For: "for loop",
             hr.Return: "return statement",
-            hr.Assert: "assert statement",
             hr.BinOp: "operator expression",
             hr.UnaryOp: "unary expression",
             hr.Expr: "expression statement",
@@ -105,7 +193,7 @@ class _Compiler(hr.Walker):
         global_var_count = self.table.count_globals()
 
         if global_var_count != 0:
-            self.instructions.append(ir.GlobalAlloc(global_var_count))
+            self.instructions.append(ir.Alloc(global_var_count))
 
         self.traverse(node.body)
 
@@ -118,6 +206,8 @@ class _Compiler(hr.Walker):
             and node.name not in self.runtime_functions
         ):
             return
+        if node.is_macro:
+            return
         skip = ir.Jump(None)
 
         self.instructions.append(skip)
@@ -127,27 +217,47 @@ class _Compiler(hr.Walker):
 
         self.function_locations[qualified_name] = len(self.instructions)
 
-        self.instructions.append(ir.LocalAlloc(self.table.count_locals(qualified_name)))
+        self.instructions.append(ir.Alloc(self.table.count_locals(qualified_name)))
 
         self.traverse(node.body)
 
-        if node.return_type == NONE and (
+        if node.name == "main":
+            self.instructions.append(ir.StackPushLiteral(0))
+            self.emit_return(qualified_name, INT)
+        elif node.return_type == NONE and (
             not node.body or not isinstance(node.body[-1], hr.Return)
         ):
-            self.instructions.append(ir.Return(self.table.count_arg_words(qualified_name)))
+            self.emit_return(qualified_name, NONE)
 
         skip.location = len(self.instructions)
 
         self.context = None
 
     def visit_Return(self, node):
+        if self.macro_returns:
+            macro_return = self.macro_returns[-1]
+            retained = sum(
+                context["retained_words"]
+                for context in self.loop_contexts[macro_return["loop_depth"]:]
+            )
+            if retained:
+                self.instructions.append(ir.Drop(retained))
+            if node.value is not None:
+                self.traverse(node.value)
+            if node is macro_return["terminal_return"]:
+                return
+            jump = ir.Jump(None)
+            self.instructions.append(jump)
+            macro_return["jumps"].append(jump)
+            return
         retained = sum(context["retained_words"] for context in self.loop_contexts)
         if retained:
             self.instructions.append(ir.Drop(retained))
+        function = self.context[1]
         if node.value is not None:
             self.traverse(node.value)
 
-        self.instructions.append(ir.Return(self.table.count_arg_words(self.context[1].qualified_name)))
+        self.emit_return(function.qualified_name, function.return_type)
 
     def visit_Expr(self, node):
         self.traverse(node.expr)
@@ -178,7 +288,7 @@ class _Compiler(hr.Walker):
         if isinstance(node.lhs, hr.Attribute):
             self.traverse(node.lhs.value)
             field = self.table.classes[node.lhs.resolved_class].fields[node.lhs.attr]
-            self.instructions.append(ir.OpStackPushLiteral(field.offset))
+            self.instructions.append(ir.StackPushLiteral(field.offset))
             self.instructions.append(ir.IAdd())
             self.traverse(node.rhs)
             self.emit_store_words(field.word_width)
@@ -209,10 +319,6 @@ class _Compiler(hr.Walker):
     def visit_Pass(self, node):
         pass
 
-    def visit_Assert(self, node):
-        self.traverse(node.test)
-        self.instructions.append(ir.Assert())
-
     def visit_Call(self, node):
         if hasattr(node, "print_end"):
             self.emit_print(node)
@@ -225,8 +331,8 @@ class _Compiler(hr.Walker):
             self.emit_streamed_auto_repr(self.table.classes[node.streamed_class])
         elif hasattr(node, "streamed_method"):
             self.traverse(node.args[0])
-            self.instructions.append(ir.OpStackPopToCallStack())
-            self.instructions.append(ir.Call(node.streamed_method))
+            self.emit_value_to_incoming_frame(node.args[0].type)
+            self.emit_call(node.streamed_method)
             self.instructions.append(ir.PrintString())
         elif hasattr(node, "resolved_intrinsic"):
             if node.resolved_intrinsic == "cast_str":
@@ -253,7 +359,7 @@ class _Compiler(hr.Walker):
                 self.instructions.append(ir.Drop(1))
             elif node.resolved_intrinsic == "len_heap":
                 self.traverse(node.args[0])
-                self.instructions.append(ir.OpStackPushLiteral(1))
+                self.instructions.append(ir.StackPushLiteral(1))
                 self.instructions.append(ir.IAdd())
                 self.instructions.append(ir.Load())
             elif node.resolved_intrinsic == "str_char":
@@ -272,24 +378,24 @@ class _Compiler(hr.Walker):
                 self.instructions.append(ir.Store())
             elif node.resolved_intrinsic == "bool_int":
                 self.traverse(node.args[0])
-                self.instructions.append(ir.OpStackPushLiteral(0))
+                self.instructions.append(ir.StackPushLiteral(0))
                 self.instructions.append(ir.NotEqual())
             elif node.resolved_intrinsic == "int_bool":
                 self.traverse(node.args[0])
-                self.instructions.append(ir.OpStackPushLiteral(0))
+                self.instructions.append(ir.StackPushLiteral(0))
                 self.instructions.append(ir.IAdd())
             elif node.resolved_intrinsic == "bool_str":
                 self.traverse(node.args[0])
                 self.instructions.append(ir.Roll(1))
                 self.instructions.append(ir.Drop(1))
-                self.instructions.append(ir.OpStackPushLiteral(0))
+                self.instructions.append(ir.StackPushLiteral(0))
                 self.instructions.append(ir.NotEqual())
             else:
                 self.traverse(node.args[0])
         elif hasattr(node, "resolved_runtime"):
             self.traverse(node.args[0])
-            self.emit_value_to_call_stack(node.args[0].type)
-            self.instructions.append(ir.Call(node.resolved_runtime))
+            self.emit_value_to_incoming_frame(node.args[0].type)
+            self.emit_call(node.resolved_runtime)
         elif hasattr(node, "resolved_builtin"):
             if node.args and isinstance(node.args[0], hr.Call) and hasattr(node.args[0], "auto_repr_class"):
                 inner = node.args[0]
@@ -315,31 +421,39 @@ class _Compiler(hr.Walker):
             raise Exception("Automatic class strings may only be streamed by print")
         elif hasattr(node, "resolved_method"):
             self.traverse(node.args[0])
-            self.emit_value_to_call_stack(node.args[0].type)
-            self.instructions.append(ir.Call(node.resolved_method))
+            self.emit_value_to_incoming_frame(node.args[0].type)
+            self.emit_call(node.resolved_method)
         elif node.func in self.table.classes:
             class_info = self.table.classes[node.func]
             constructor = class_info.methods["__init__"]
-            self.instructions.append(ir.OpStackPushLiteral(class_info.word_width))
+            self.instructions.append(ir.StackPushLiteral(class_info.word_width))
             self.instructions.append(ir.Malloc())
+            # Preserve the object as the class-call result. The duplicate is
+            # moved above the constructor arguments to become ``self``.
+            self.instructions.append(ir.Dupe())
+            constructor_argument_width = 0
             for argument in reversed(node.args):
                 self.traverse(argument)
-                for _ in range(word_count(argument.type)):
-                    self.instructions.append(ir.OpStackPopToCallStack())
-            self.instructions.append(ir.Dupe())
-            self.instructions.append(ir.OpStackPopToCallStack())
-            self.instructions.append(ir.Call(constructor.qualified_name))
+                self.emit_value_to_incoming_frame(argument.type)
+                constructor_argument_width += word_count(argument.type)
+            if constructor_argument_width:
+                self.instructions.append(ir.Roll(constructor_argument_width))
+            self.emit_call(constructor.qualified_name)
         elif node.func in self.table.functions:
 
             if self.table.count_args(node.func) != node.expanded_argument_count:
                 raise Exception("Typed call argument count changed before code generation")
 
+            function = self.table.functions[node.func][1]
+            if function.is_macro:
+                self.emit_macro(node.macro_plan, node.args)
+                return
+
             for a in reversed(node.args):
                 self.traverse(a)
-                for _ in range(word_count(a.type)):
-                    self.instructions.append(ir.OpStackPopToCallStack())
+                self.emit_value_to_incoming_frame(a.type)
             #Call contains a string identifying the caller which is later replaced by an address-like index
-            self.instructions.append(ir.Call(node.func))
+            self.emit_call(node.func)
         elif node.func in self.bi_instructions:
             expected_arg_count = len(self.bi_instructions[node.func].parameter_types)
 
@@ -372,8 +486,8 @@ class _Compiler(hr.Walker):
                 self.emit_streamed_auto_repr(self.table.classes[node.streamed_class])
             elif hasattr(node, "streamed_method"):
                 self.traverse(value)
-                self.instructions.append(ir.OpStackPopToCallStack())
-                self.instructions.append(ir.Call(node.streamed_method))
+                self.emit_value_to_incoming_frame(value.type)
+                self.emit_call(node.streamed_method)
                 self.instructions.append(ir.PrintString())
             elif isinstance(value, hr.Call) and hasattr(value, "auto_repr_class"):
                 self.traverse(value.args[0])
@@ -398,10 +512,10 @@ class _Compiler(hr.Walker):
             return
         if getattr(node, "contains_char", False):
             self.emit_char_string(node.args[0])
-            self.emit_value_to_call_stack(STR)
+            self.emit_value_to_incoming_frame(STR)
             self.traverse(node.receiver)
-            self.emit_value_to_call_stack(STR)
-            self.instructions.append(ir.Call(node.resolved_method))
+            self.emit_value_to_incoming_frame(STR)
+            self.emit_call(node.resolved_method)
             return
         if hasattr(node, "resolved_list_method"):
             arguments = list(node.args)
@@ -411,29 +525,32 @@ class _Compiler(hr.Walker):
                 arguments = [default_index]
             for argument in reversed(arguments):
                 self.traverse(argument)
-                self.emit_value_to_call_stack(argument.type)
+                self.emit_value_to_incoming_frame(argument.type)
             self.traverse(node.receiver)
-            self.emit_value_to_call_stack(node.receiver.type)
-            self.instructions.append(ir.Call(node.resolved_list_method))
+            self.emit_value_to_incoming_frame(node.receiver.type)
+            self.emit_call(node.resolved_list_method)
+            return
+        target = self.table.functions.get(node.resolved_method)
+        if target is not None and target[1].is_macro:
+            self.emit_macro(node.macro_plan, [node.receiver, *node.args])
             return
         for argument in reversed(node.args):
             self.traverse(argument)
-            for _ in range(word_count(argument.type)):
-                self.instructions.append(ir.OpStackPopToCallStack())
+            self.emit_value_to_incoming_frame(argument.type)
         self.traverse(node.receiver)
-        self.emit_value_to_call_stack(node.receiver.type)
-        self.instructions.append(ir.Call(node.resolved_method))
+        self.emit_value_to_incoming_frame(node.receiver.type)
+        self.emit_call(node.resolved_method)
 
     def emit_list_contains(self, node):
         """Keep [needle, descriptor, index] on the stack while searching."""
         width = word_count(node.contains_element_type)
         self.traverse(node.args[0])
         self.traverse(node.receiver)
-        self.instructions.append(ir.OpStackPushLiteral(0))
+        self.instructions.append(ir.StackPushLiteral(0))
         condition = len(self.instructions)
         self.instructions.append(ir.Dupe())
         self.emit_dupe_at_depth(2)
-        for instruction in [ir.OpStackPushLiteral(1), ir.IAdd(), ir.Load(), ir.LessThan()]:
+        for instruction in [ir.StackPushLiteral(1), ir.IAdd(), ir.Load(), ir.LessThan()]:
             self.instructions.append(instruction)
         exhausted = ir.JumpIfFalse(None)
         self.instructions.append(exhausted)
@@ -443,40 +560,40 @@ class _Compiler(hr.Walker):
         self.emit_dupe_at_depth(width + 1)
         self.instructions.append(ir.Load())
         self.emit_dupe_at_depth(width + 1)
-        for instruction in [ir.OpStackPushLiteral(width), ir.IMultiply(), ir.IAdd()]:
+        for instruction in [ir.StackPushLiteral(width), ir.IMultiply(), ir.IAdd()]:
             self.instructions.append(instruction)
         self.emit_load_words(width)
         comparison = node.contains_comparison
         if node.contains_element_type == STR or hasattr(comparison, "resolved_method"):
             if hasattr(comparison, "resolved_method"):
                 self.instructions.append(ir.Roll(1))
-            self.emit_value_to_call_stack(node.contains_element_type)
-            self.emit_value_to_call_stack(node.contains_element_type)
+            self.emit_value_to_incoming_frame(node.contains_element_type)
+            self.emit_value_to_incoming_frame(node.contains_element_type, beneath=width)
             method = getattr(comparison, "resolved_method", "__gvm_str_compare")
-            self.instructions.append(ir.Call(method))
+            self.emit_call(method)
             if node.contains_element_type == STR:
-                for instruction in [ir.OpStackPushLiteral(0), ir.Equal()]:
+                for instruction in [ir.StackPushLiteral(0), ir.Equal()]:
                     self.instructions.append(instruction)
         else:
             self.instructions.append(ir.Equal())
         next_item = ir.JumpIfFalse(None)
         self.instructions.append(next_item)
-        for instruction in [ir.Drop(width + 2), ir.OpStackPushLiteral(1)]:
+        for instruction in [ir.Drop(width + 2), ir.StackPushLiteral(1)]:
             self.instructions.append(instruction)
         done = ir.Jump(None)
         self.instructions.append(done)
         next_item.location = len(self.instructions)
-        for instruction in [ir.OpStackPushLiteral(1), ir.IAdd(), ir.Jump(condition)]:
+        for instruction in [ir.StackPushLiteral(1), ir.IAdd(), ir.Jump(condition)]:
             self.instructions.append(instruction)
         exhausted.location = len(self.instructions)
-        for instruction in [ir.Drop(width + 2), ir.OpStackPushLiteral(0)]:
+        for instruction in [ir.Drop(width + 2), ir.StackPushLiteral(0)]:
             self.instructions.append(instruction)
         done.location = len(self.instructions)
 
     def visit_Attribute(self, node):
         self.traverse(node.value)
         field = self.table.classes[node.resolved_class].fields[node.attr]
-        self.instructions.append(ir.OpStackPushLiteral(field.offset))
+        self.instructions.append(ir.StackPushLiteral(field.offset))
         self.instructions.append(ir.IAdd())
         self.emit_load_words(field.word_width)
 
@@ -498,9 +615,83 @@ class _Compiler(hr.Walker):
         else:
             raise Exception(f"Resolved built-in '{name}' is unavailable")
 
-    def emit_value_to_call_stack(self, value_type):
-        for _ in range(word_count(value_type)):
-            self.instructions.append(ir.OpStackPopToCallStack())
+    def emit_value_to_incoming_frame(self, value_type, beneath=0):
+        """Move and reverse a flattened value into the incoming-frame area."""
+        width = word_count(value_type)
+        for depth in range(beneath, beneath + width):
+            if depth == 0:
+                continue
+            self.instructions.append(ir.Roll(depth))
+
+    def emit_call(self, target):
+        """Reserve caller-owned result slots beneath prepared arguments."""
+        function = self.table.functions.get(target)
+        if function is not None and function[1].is_macro:
+            raise Exception(
+                f"Macro '{target}' reached a call-only compiler path instead of being expanded"
+            )
+        argument_width = self.table.count_arg_words(target)
+        return_width = word_count(self.table.functions[target][1].return_type)
+        for _ in range(return_width):
+            self.instructions.append(ir.StackPushLiteral(0))
+            for _ in range(argument_width):
+                self.instructions.append(ir.Roll(argument_width))
+        self.instructions.append(ir.Call(target))
+
+    def emit_macro(self, plan, arguments):
+        """Emit one guaranteed, hygienic expansion without creating a call frame."""
+        groups = []
+        parameter_index = 0
+        for argument in arguments:
+            expanded_count = (
+                len(argument.type.element_types)
+                if isinstance(argument, hr.Starred)
+                else 1
+            )
+            groups.append((argument, plan.parameters[parameter_index:parameter_index + expanded_count]))
+            parameter_index += expanded_count
+        if parameter_index != len(plan.parameters):
+            raise Exception("Typed macro argument count changed before code generation")
+
+        for argument, parameters in reversed(groups):
+            self.traverse(argument)
+            for parameter in reversed(parameters):
+                for relative_offset in reversed(range(parameter.word_width)):
+                    self.emit_pop_symbol(parameter, relative_offset)
+
+        self.macro_bindings.append(plan.bindings)
+        terminal_return = (
+            plan.body[-1]
+            if plan.body and isinstance(plan.body[-1], hr.Return)
+            else None
+        )
+        macro_return = {
+            "jumps": [],
+            "loop_depth": len(self.loop_contexts),
+            "terminal_return": terminal_return,
+        }
+        self.macro_returns.append(macro_return)
+        try:
+            self.traverse(plan.body)
+        finally:
+            self.macro_returns.pop()
+            self.macro_bindings.pop()
+
+        if plan.implicit_return_zero and terminal_return is None:
+            self.instructions.append(ir.StackPushLiteral(0))
+
+        end = len(self.instructions)
+        for jump in macro_return["jumps"]:
+            jump.location = end
+
+    def emit_return(self, function_name, return_type):
+        """Store a result into the caller's slots, then pop the call frame."""
+        argument_width = self.table.count_arg_words(function_name)
+        for return_offset in range(word_count(return_type)):
+            self.instructions.append(
+                ir.StackPopVariable(-2 - argument_width - return_offset)
+            )
+        self.instructions.append(ir.Return(argument_width))
 
     def emit_load_words(self, width):
         """Replace an address with its contiguous flattened value words."""
@@ -508,7 +699,7 @@ class _Compiler(hr.Walker):
             self.instructions.append(ir.Dupe())
             self.instructions.append(ir.Load())
             self.instructions.append(ir.Roll(1))
-            self.instructions.append(ir.OpStackPushLiteral(1))
+            self.instructions.append(ir.StackPushLiteral(1))
             self.instructions.append(ir.IAdd())
         self.instructions.append(ir.Drop(1))
 
@@ -517,7 +708,7 @@ class _Compiler(hr.Walker):
         for offset in reversed(range(1, width)):
             self.instructions.append(ir.Roll(offset + 1))
             self.instructions.append(ir.Dupe())
-            self.instructions.append(ir.OpStackPushLiteral(offset))
+            self.instructions.append(ir.StackPushLiteral(offset))
             self.instructions.append(ir.IAdd())
             self.instructions.append(ir.Roll(2))
             self.instructions.append(ir.Store())
@@ -529,12 +720,12 @@ class _Compiler(hr.Walker):
 
     def emit_char_string(self, character):
         # String values are flattened as [pointer, length].
-        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.StackPushLiteral(1))
         self.instructions.append(ir.Malloc())
         self.instructions.append(ir.Dupe())
         self.traverse(character)
         self.instructions.append(ir.Store())
-        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.StackPushLiteral(1))
 
     def visit_JoinedStr(self, node):
         raise Exception("F-strings may only be streamed directly by print")
@@ -562,8 +753,8 @@ class _Compiler(hr.Walker):
         elif isinstance(value_type, ClassType):
             self.traverse(node.value)
             if hasattr(node, "resolved_method"):
-                self.instructions.append(ir.OpStackPopToCallStack())
-                self.instructions.append(ir.Call(node.resolved_method))
+                self.emit_value_to_incoming_frame(node.value.type)
+                self.emit_call(node.resolved_method)
                 self.instructions.append(ir.PrintString())
             elif hasattr(node, "auto_repr_class"):
                 self.emit_streamed_auto_repr(self.table.classes[node.auto_repr_class])
@@ -588,7 +779,7 @@ class _Compiler(hr.Walker):
                 self.instructions.append(ir.PrintString())
 
             self.instructions.append(ir.Dupe())
-            self.instructions.append(ir.OpStackPushLiteral(field.offset))
+            self.instructions.append(ir.StackPushLiteral(field.offset))
             self.instructions.append(ir.IAdd())
             self.emit_load_words(field.word_width)
             self.emit_streamed_value(field.type)
@@ -614,8 +805,8 @@ class _Compiler(hr.Walker):
             class_info = self.table.classes[value_type.name]
             method = class_info.methods.get("__str__") or class_info.methods.get("__repr__")
             if method is not None:
-                self.instructions.append(ir.OpStackPopToCallStack())
-                self.instructions.append(ir.Call(method.qualified_name))
+                self.emit_value_to_incoming_frame(value_type)
+                self.emit_call(method.qualified_name)
                 self.instructions.append(ir.PrintString())
             else:
                 self.emit_streamed_auto_repr(class_info)
@@ -643,7 +834,7 @@ class _Compiler(hr.Walker):
 
         # Preserve one scratch pointer while storing the flattened tuple into
         # a second copy of that pointer. This keeps recursive printers simple.
-        self.instructions.append(ir.OpStackPushLiteral(total_width))
+        self.instructions.append(ir.StackPushLiteral(total_width))
         self.instructions.append(ir.Malloc())
         self.instructions.append(ir.Dupe())
         for _ in range(total_width):
@@ -656,7 +847,7 @@ class _Compiler(hr.Walker):
                 self.emit_print_text(", ")
             self.instructions.append(ir.Dupe())
             if offset:
-                self.instructions.append(ir.OpStackPushLiteral(offset))
+                self.instructions.append(ir.StackPushLiteral(offset))
                 self.instructions.append(ir.IAdd())
             self.emit_load_words(word_count(element_type))
             self.emit_streamed_value(element_type)
@@ -673,15 +864,15 @@ class _Compiler(hr.Walker):
 
         # Scratch heap words hold [descriptor, index], keeping loop state away
         # from values consumed by recursive element printers.
-        self.instructions.append(ir.OpStackPushLiteral(2))
+        self.instructions.append(ir.StackPushLiteral(2))
         self.instructions.append(ir.Malloc())
         self.instructions.append(ir.Dupe())
         self.instructions.append(ir.Roll(2))
         self.instructions.append(ir.Store())
         self.instructions.append(ir.Dupe())
-        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.StackPushLiteral(1))
         self.instructions.append(ir.IAdd())
-        self.instructions.append(ir.OpStackPushLiteral(0))
+        self.instructions.append(ir.StackPushLiteral(0))
         self.instructions.append(ir.Store())
 
         self.emit_print_text("[")
@@ -689,13 +880,13 @@ class _Compiler(hr.Walker):
 
         # Preserve scratch and form index < descriptor.length.
         self.instructions.append(ir.Dupe())
-        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.StackPushLiteral(1))
         self.instructions.append(ir.IAdd())
         self.instructions.append(ir.Load())
         self.instructions.append(ir.Roll(1))
         self.instructions.append(ir.Dupe())
         self.instructions.append(ir.Load())
-        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.StackPushLiteral(1))
         self.instructions.append(ir.IAdd())
         self.instructions.append(ir.Load())
         self.instructions.append(ir.Roll(1))
@@ -707,10 +898,10 @@ class _Compiler(hr.Walker):
 
         # Print the separator after the first element.
         self.instructions.append(ir.Dupe())
-        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.StackPushLiteral(1))
         self.instructions.append(ir.IAdd())
         self.instructions.append(ir.Load())
-        self.instructions.append(ir.OpStackPushLiteral(0))
+        self.instructions.append(ir.StackPushLiteral(0))
         self.instructions.append(ir.GreaterThan())
         first = ir.JumpIfFalse(None)
         self.instructions.append(first)
@@ -723,14 +914,14 @@ class _Compiler(hr.Walker):
         self.instructions.append(ir.Load())
         self.instructions.append(ir.Roll(1))
         self.instructions.append(ir.Dupe())
-        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.StackPushLiteral(1))
         self.instructions.append(ir.IAdd())
         self.instructions.append(ir.Load())
         self.instructions.append(ir.Roll(1))
         self.instructions.append(ir.Roll(2))
         self.instructions.append(ir.Roll(2))
         if element_width != 1:
-            self.instructions.append(ir.OpStackPushLiteral(element_width))
+            self.instructions.append(ir.StackPushLiteral(element_width))
             self.instructions.append(ir.IMultiply())
         self.instructions.append(ir.IAdd())
         self.emit_load_words(element_width)
@@ -738,11 +929,11 @@ class _Compiler(hr.Walker):
 
         # scratch.index += 1
         self.instructions.append(ir.Dupe())
-        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.StackPushLiteral(1))
         self.instructions.append(ir.IAdd())
         self.instructions.append(ir.Dupe())
         self.instructions.append(ir.Load())
-        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.StackPushLiteral(1))
         self.instructions.append(ir.IAdd())
         self.instructions.append(ir.Store())
         self.instructions.append(ir.Jump(loop))
@@ -838,25 +1029,25 @@ class _Compiler(hr.Walker):
 
     def emit_class_for(self, node):
         self.traverse(node.iterable)
-        self.emit_value_to_call_stack(node.iterable.type)
-        self.instructions.append(ir.Call(node.iter_method))
+        self.emit_value_to_incoming_frame(node.iterable.type)
+        self.emit_call(node.iter_method)
         condition = len(self.instructions)
         self.instructions.append(ir.Dupe())
-        self.instructions.append(ir.OpStackPopToCallStack())
-        self.instructions.append(ir.Call(node.bool_method))
+        self.emit_value_to_incoming_frame(self.table.functions[node.bool_method][1].args[0].annotation)
+        self.emit_call(node.bool_method)
         exhausted = ir.JumpIfFalse(None)
         self.instructions.append(exhausted)
         context = self.new_loop_context(1, condition)
         self.instructions.append(ir.Dupe())
-        self.instructions.append(ir.OpStackPopToCallStack())
-        self.instructions.append(ir.Call(node.next_method))
+        self.emit_value_to_incoming_frame(self.table.functions[node.next_method][1].args[0].annotation)
+        self.emit_call(node.next_method)
         self.emit_pop_for_target(node.target)
         self.traverse(node.body)
         self.emit_for_epilogue(node, context, 1, condition, [exhausted])
 
     def emit_string_for(self, node):
         self.traverse(node.iterable)  # [pointer, length]
-        self.instructions.append(ir.OpStackPushLiteral(0))  # index
+        self.instructions.append(ir.StackPushLiteral(0))  # index
         condition = len(self.instructions)
         self.instructions.append(ir.Dupe())
         self.emit_dupe_at_depth(2)
@@ -872,17 +1063,17 @@ class _Compiler(hr.Walker):
         self.traverse(node.body)
         increment = len(self.instructions)
         context["continue_target"] = increment
-        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.StackPushLiteral(1))
         self.instructions.append(ir.IAdd())
         self.emit_for_epilogue(node, context, 3, condition, [exhausted])
 
     def emit_list_for(self, node):
         self.traverse(node.iterable)  # [descriptor]
-        self.instructions.append(ir.OpStackPushLiteral(0))  # index
+        self.instructions.append(ir.StackPushLiteral(0))  # index
         condition = len(self.instructions)
         self.instructions.append(ir.Dupe())
         self.emit_dupe_at_depth(2)  # descriptor below index and duplicate index
-        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.StackPushLiteral(1))
         self.instructions.append(ir.IAdd())
         self.instructions.append(ir.Load())
         self.instructions.append(ir.LessThan())
@@ -893,7 +1084,7 @@ class _Compiler(hr.Walker):
         self.instructions.append(ir.Load())  # data pointer
         self.emit_dupe_at_depth(1)  # index
         if node.element_width != 1:
-            self.instructions.append(ir.OpStackPushLiteral(node.element_width))
+            self.instructions.append(ir.StackPushLiteral(node.element_width))
             self.instructions.append(ir.IMultiply())
         self.instructions.append(ir.IAdd())
         self.emit_load_words(node.element_width)
@@ -901,7 +1092,7 @@ class _Compiler(hr.Walker):
         self.traverse(node.body)
         increment = len(self.instructions)
         context["continue_target"] = increment
-        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.StackPushLiteral(1))
         self.instructions.append(ir.IAdd())
         self.emit_for_epilogue(node, context, 2, condition, [exhausted])
 
@@ -911,7 +1102,7 @@ class _Compiler(hr.Walker):
         self.traverse(node.range_step)  # [current, stop, step]
         condition = len(self.instructions)
         self.instructions.append(ir.Dupe())
-        self.instructions.append(ir.OpStackPushLiteral(0))
+        self.instructions.append(ir.StackPushLiteral(0))
         self.instructions.append(ir.GreaterThan())
         negative = ir.JumpIfFalse(None)
         self.instructions.append(negative)
@@ -924,7 +1115,7 @@ class _Compiler(hr.Walker):
         self.instructions.append(body_jump)
         negative.location = len(self.instructions)
         self.instructions.append(ir.Dupe())
-        self.instructions.append(ir.OpStackPushLiteral(0))
+        self.instructions.append(ir.StackPushLiteral(0))
         self.instructions.append(ir.LessThan())
         exhausted_zero = ir.JumpIfFalse(None)
         self.instructions.append(exhausted_zero)
@@ -1007,28 +1198,24 @@ class _Compiler(hr.Walker):
                     self.instructions.append(ir.Dupe())
                 else:
                     self.instructions.append(ir.Dupe())
-                    self.instructions.append(ir.OpStackPushLiteral(1))
+                    self.instructions.append(ir.StackPushLiteral(1))
                     self.instructions.append(ir.IAdd())
                     self.instructions.append(ir.Load())
-                self.instructions.append(ir.OpStackPopToCallStack())
                 if node.slice.lower is None:
-                    self.instructions.append(ir.OpStackPushLiteral(0))
+                    self.instructions.append(ir.StackPushLiteral(0))
                 else:
                     self.traverse(node.slice.lower)
-                self.instructions.append(ir.OpStackPopToCallStack())
-                self.emit_value_to_call_stack(node.value.type)
+                self.emit_value_to_incoming_frame(node.value.type, beneath=2)
             else:
                 self.traverse(node.slice.upper)
-                self.instructions.append(ir.OpStackPopToCallStack())
                 if node.slice.lower is None:
-                    self.instructions.append(ir.OpStackPushLiteral(0))
+                    self.instructions.append(ir.StackPushLiteral(0))
                 else:
                     self.traverse(node.slice.lower)
-                self.instructions.append(ir.OpStackPopToCallStack())
                 self.traverse(node.value)
-                self.emit_value_to_call_stack(node.value.type)
+                self.emit_value_to_incoming_frame(node.value.type)
             runtime = getattr(node, "resolved_list_slice", None) or node.resolved_runtime
-            self.instructions.append(ir.Call(runtime))
+            self.emit_call(runtime)
             return
 
         if isinstance(node.value.type, TupleType):
@@ -1049,7 +1236,7 @@ class _Compiler(hr.Walker):
         if isinstance(node.value.type, ListType):
             width = word_count(node.value.type.element_type)
             if width != 1:
-                self.instructions.append(ir.OpStackPushLiteral(width))
+                self.instructions.append(ir.StackPushLiteral(width))
                 self.instructions.append(ir.IMultiply())
         self.instructions.append(ir.IAdd())
 
@@ -1063,10 +1250,10 @@ class _Compiler(hr.Walker):
         while capacity < len(node.elements):
             capacity *= 2
         # Allocate the stable [data pointer, length, capacity] descriptor.
-        self.instructions.append(ir.OpStackPushLiteral(3))
+        self.instructions.append(ir.StackPushLiteral(3))
         self.instructions.append(ir.Malloc())
         self.instructions.append(ir.Dupe())
-        self.instructions.append(ir.OpStackPushLiteral(capacity * element_width))
+        self.instructions.append(ir.StackPushLiteral(capacity * element_width))
         self.instructions.append(ir.Malloc())
         self.instructions.append(ir.Store())
 
@@ -1074,21 +1261,21 @@ class _Compiler(hr.Walker):
             self.instructions.append(ir.Dupe())
             self.instructions.append(ir.Load())
             if i:
-                self.instructions.append(ir.OpStackPushLiteral(i * element_width))
+                self.instructions.append(ir.StackPushLiteral(i * element_width))
                 self.instructions.append(ir.IAdd())
 
             self.traverse(v)
 
             self.emit_store_words(element_width)
         self.instructions.append(ir.Dupe())
-        self.instructions.append(ir.OpStackPushLiteral(1))
+        self.instructions.append(ir.StackPushLiteral(1))
         self.instructions.append(ir.IAdd())
-        self.instructions.append(ir.OpStackPushLiteral(len(node.elements)))
+        self.instructions.append(ir.StackPushLiteral(len(node.elements)))
         self.instructions.append(ir.Store())
         self.instructions.append(ir.Dupe())
-        self.instructions.append(ir.OpStackPushLiteral(2))
+        self.instructions.append(ir.StackPushLiteral(2))
         self.instructions.append(ir.IAdd())
-        self.instructions.append(ir.OpStackPushLiteral(capacity))
+        self.instructions.append(ir.StackPushLiteral(capacity))
         self.instructions.append(ir.Store())
 
     def visit_Tuple(self, node):
@@ -1100,20 +1287,20 @@ class _Compiler(hr.Walker):
     def visit_Constant(self, node):
 
         if type(node.value) is str and node.type == CHAR:
-            self.instructions.append(ir.OpStackPushLiteral(ord(node.value)))
+            self.instructions.append(ir.StackPushLiteral(ord(node.value)))
 
         elif type(node.value) is str:
-            self.instructions.append(ir.OpStackPushLiteral(len(node.value)))
+            self.instructions.append(ir.StackPushLiteral(len(node.value)))
             self.instructions.append(ir.Malloc())
 
             for i, c in enumerate(node.value):
                 self.instructions.append(ir.Dupe())
-                self.instructions.append(ir.OpStackPushLiteral(i))
+                self.instructions.append(ir.StackPushLiteral(i))
                 self.instructions.append(ir.IAdd())
-                self.instructions.append(ir.OpStackPushLiteral(ord(c)))
+                self.instructions.append(ir.StackPushLiteral(ord(c)))
                 self.instructions.append(ir.Store())
 
-            self.instructions.append(ir.OpStackPushLiteral(len(node.value)))
+            self.instructions.append(ir.StackPushLiteral(len(node.value)))
 
         elif node.value is not None:
             literal = (
@@ -1121,9 +1308,11 @@ class _Compiler(hr.Walker):
                 if node.type == FLOAT and type(node.value) is int
                 else node.value
             )
-            self.instructions.append(ir.OpStackPushLiteral(literal))
+            self.instructions.append(ir.StackPushLiteral(literal))
 
     def name_symbol(self, identifier):
+        if self.macro_bindings and identifier in self.macro_bindings[-1]:
+            return self.macro_bindings[-1][identifier]
         if self.context is not None and identifier in self.context[0]:
             return self.context[0][identifier]
         return self.table.top_level[identifier]
@@ -1131,20 +1320,20 @@ class _Compiler(hr.Walker):
     def emit_push_symbol(self, symbol, relative_offset):
         offset = symbol.stack_offset + relative_offset
         if symbol.is_global:
-            self.instructions.append(ir.OpStackPushGlobal(offset))
+            self.instructions.append(ir.StackPushGlobal(offset))
         elif symbol.is_arg:
-            self.instructions.append(ir.OpStackPushArg(offset))
+            self.instructions.append(ir.StackPushVariable(-2 - offset))
         else:
-            self.instructions.append(ir.OpStackPushLocal(offset))
+            self.instructions.append(ir.StackPushVariable(1 + offset))
 
     def emit_pop_symbol(self, symbol, relative_offset):
         offset = symbol.stack_offset + relative_offset
         if symbol.is_global:
-            self.instructions.append(ir.OpStackPopGlobal(offset))
+            self.instructions.append(ir.StackPopGlobal(offset))
         elif symbol.is_arg:
-            self.instructions.append(ir.OpStackPopArg(offset))
+            self.instructions.append(ir.StackPopVariable(-2 - offset))
         else:
-            self.instructions.append(ir.OpStackPopLocal(offset))
+            self.instructions.append(ir.StackPopVariable(1 + offset))
 
     def emit_projection(self, total_width, offset, selected_width):
         if total_width == selected_width and offset == 0:
@@ -1179,10 +1368,10 @@ class _Compiler(hr.Walker):
             operand = node.left if node.resolved_reverse else node.right
             receiver = node.right if node.resolved_reverse else node.left
             self.traverse(operand)
-            self.emit_value_to_call_stack(operand.type)
+            self.emit_value_to_incoming_frame(operand.type)
             self.traverse(receiver)
-            self.emit_value_to_call_stack(receiver.type)
-            self.instructions.append(ir.Call(node.resolved_method))
+            self.emit_value_to_incoming_frame(receiver.type)
+            self.emit_call(node.resolved_method)
             return
 
         op = type(node.operator)
@@ -1192,11 +1381,11 @@ class _Compiler(hr.Walker):
                 self.emit_char_string(needle)
             else:
                 self.traverse(needle)
-            self.emit_value_to_call_stack(STR)
+            self.emit_value_to_incoming_frame(STR)
             self.traverse(node.right)
-            self.emit_value_to_call_stack(STR)
-            self.instructions.append(ir.Call("__gvm_str_find"))
-            self.instructions.append(ir.OpStackPushLiteral(-1))
+            self.emit_value_to_incoming_frame(STR)
+            self.emit_call("__gvm_str_find")
+            self.instructions.append(ir.StackPushLiteral(-1))
             self.instructions.append((ir.NotEqual if op is ast.In else ir.Equal)())
             return
         if node.left_type == STR and node.right_type == STR and op in {
@@ -1204,9 +1393,9 @@ class _Compiler(hr.Walker):
         }:
             for argument in (node.right, node.left):
                 self.traverse(argument)
-                self.emit_value_to_call_stack(argument.type)
-            self.instructions.append(ir.Call("__gvm_str_compare"))
-            self.instructions.append(ir.OpStackPushLiteral(0))
+                self.emit_value_to_incoming_frame(argument.type)
+            self.emit_call("__gvm_str_compare")
+            self.instructions.append(ir.StackPushLiteral(0))
             comparisons = {
                 ast.Eq: ir.Equal, ast.NotEq: ir.NotEqual,
                 ast.Lt: ir.LessThan, ast.Gt: ir.GreaterThan,
@@ -1229,8 +1418,8 @@ class _Compiler(hr.Walker):
                     self.emit_char_string(argument)
                 else:
                     self.traverse(argument)
-                self.emit_value_to_call_stack(STR if argument.type == CHAR else argument.type)
-            self.instructions.append(ir.Call(runtime))
+                self.emit_value_to_incoming_frame(STR if argument.type == CHAR else argument.type)
+            self.emit_call(runtime)
             return
 
         self.traverse(node.left)
@@ -1295,8 +1484,8 @@ class _Compiler(hr.Walker):
 
         if hasattr(node, "resolved_method"):
             self.traverse(node.operand)
-            self.emit_value_to_call_stack(node.operand.type)
-            self.instructions.append(ir.Call(node.resolved_method))
+            self.emit_value_to_incoming_frame(node.operand.type)
+            self.emit_call(node.resolved_method)
             return
 
         self.traverse(node.operand)
@@ -1327,6 +1516,10 @@ def compile(
     extra_functions: dict | None = None,
     instruction_set: InstructionSet | None = None,
 ):
+    has_main = any(
+        isinstance(node, hr.FunctionDef) and node.name == "main"
+        for node in ast.body
+    )
     runtime_added = False
     if not getattr(ast, "_string_runtime_added", False):
         ast.body.extend(string_runtime.runtime_definitions())
@@ -1366,12 +1559,18 @@ def compile(
             )
 
     check_types(ast, table, builtins)
+    _plan_macro_expansions(ast, table)
     table.calculate_layouts()
     c = _Compiler(table, extra_instructions, extra_functions)
     c.runtime_functions = (
         string_runtime.required_functions(ast) | list_runtime.required_functions(ast)
     )
     c.walk(ast)
+
+    # A module without an entry function still has a successful program result.
+    # Calls to an undefined main are rejected earlier like any other unknown call.
+    if not has_main:
+        c.instructions.append(ir.StackPushLiteral(0))
 
     # Loop over all calls replace the functions names with function indices
     for instruction in c.instructions:

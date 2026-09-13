@@ -9,6 +9,20 @@ from typecheck import TypeCheckError
 
 
 class CallableClassTests(unittest.TestCase):
+    def test_global_constant_can_anchor_callable_argument_inference(self):
+        self.assertEqual(self.run_source('''
+PRIME = 43
+class Poly:
+    def __init__(self):
+        pass
+    def __call__(self, x):
+        return x % 2
+main()
+def main():
+    poly = Poly()
+    return poly(PRIME)
+'''), 1)
+
     def test_constructor_infers_list_populated_in_nested_block(self):
         for block, expected in (
             ('for i in range(3):\n        values.append(i)', 0),

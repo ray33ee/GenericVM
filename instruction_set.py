@@ -55,12 +55,11 @@ class BuiltinDefinition:
 
 
 class InstructionGroup:
-    STACK_LITERALS = frozenset({ir.OpStackPushLiteral})
-    LOCAL_STORAGE = frozenset({ir.OpStackPushLocal, ir.OpStackPopLocal, ir.LocalAlloc})
-    GLOBAL_STORAGE = frozenset({ir.OpStackPushGlobal, ir.OpStackPopGlobal, ir.GlobalAlloc})
+    STACK_LITERALS = frozenset({ir.StackPushLiteral})
+    LOCAL_STORAGE = frozenset({ir.StackPushVariable, ir.StackPopVariable, ir.Alloc})
+    GLOBAL_STORAGE = frozenset({ir.StackPushGlobal, ir.StackPopGlobal, ir.Alloc})
     FUNCTIONS = frozenset({
-        ir.Call, ir.Return, ir.LocalAlloc, ir.OpStackPushArg,
-        ir.OpStackPopArg, ir.OpStackPopToCallStack,
+        ir.Call, ir.Return, ir.Alloc,
     })
     BRANCHING = frozenset({ir.Jump, ir.JumpIfTrue, ir.JumpIfFalse})
     COMPARISONS = frozenset({
@@ -82,7 +81,6 @@ class InstructionGroup:
     PRINTING = frozenset({
         ir.PrintInt, ir.PrintFloat, ir.PrintString, ir.PrintBool, ir.PrintChar,
     })
-    ASSERTIONS = frozenset({ir.Assert})
     CONDITIONAL_VALUE = frozenset({ir.Ternary})
 
     CORE = STACK_LITERALS

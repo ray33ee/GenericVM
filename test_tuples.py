@@ -33,9 +33,9 @@ class TupleLayoutTests(unittest.TestCase):
 
     def test_drop_and_roll_project_stack_words(self):
         instructions = [
-            ir.OpStackPushLiteral(1),
-            ir.OpStackPushLiteral(2),
-            ir.OpStackPushLiteral(3),
+            ir.StackPushLiteral(1),
+            ir.StackPushLiteral(2),
+            ir.StackPushLiteral(3),
             ir.Drop(1),
             ir.Roll(1),
             ir.Drop(1),
@@ -63,7 +63,7 @@ def main() -> int:
         self.assertEqual(function_symbols["pair"].stack_offset, 1)
         self.assertEqual(function_symbols["pair"].word_width, 2)
         self.assertEqual(function_symbols["last"].stack_offset, 3)
-        allocation = next(item for item in instructions if isinstance(item, ir.LocalAlloc))
+        allocation = next(item for item in instructions if isinstance(item, ir.Alloc))
         self.assertEqual(allocation.variable_count, 4)
 
     def test_container_type_selects_addressing_strategy(self):
@@ -124,7 +124,7 @@ main()
 def main() -> int:
     return pair[1]
 """)
-        allocation = next(item for item in instructions if isinstance(item, ir.GlobalAlloc))
+        allocation = next(item for item in instructions if isinstance(item, ir.Alloc))
         self.assertEqual(allocation.variable_count, 2)
         self.assertEqual(symbols.top_level["pair"].word_width, 2)
         self.assertEqual(interpreter.Interpreter().run(instructions), 9)

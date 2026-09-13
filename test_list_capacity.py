@@ -14,7 +14,7 @@ class ListCapacityTests(unittest.TestCase):
 
         def capture(frame, event, arg):
             if frame.f_code is Interpreter.run.__code__ and event == 'return':
-                state.update(heap=dict(frame.f_locals['heap']),
+                state.update(memory=list(frame.f_locals['memory']),
                              allocated=frame.f_locals['malloc_index'])
             return capture
 
@@ -25,8 +25,8 @@ class ListCapacityTests(unittest.TestCase):
                 pointer = Interpreter().run(program)
             finally:
                 sys.settrace(previous)
-        heap = state['heap']
-        return heap, pointer, state['allocated']
+        memory = state['memory']
+        return memory, pointer, state['allocated']
 
     def test_first_append_uses_initial_allocation(self):
         heap, descriptor, allocated = self.run_list(

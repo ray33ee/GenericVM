@@ -234,6 +234,20 @@ def identity(value):
     return value
 """)
 
+    def test_mixed_bool_and_int_parameter_evidence_has_specific_error(self):
+        with self.assertRaisesRegex(
+            SignatureInferenceError,
+            "Cannot infer parameter 'condition' of 'choose' from mixed bool and int call arguments",
+        ):
+            analyse("""
+first = choose(True)
+second = choose(True * True)
+
+@macro
+def choose(condition):
+    return condition
+""")
+
     def test_uncalled_parameter_is_not_inferred_from_body(self):
         with self.assertRaisesRegex(SignatureInferenceError, "external call"):
             analyse("""

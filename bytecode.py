@@ -125,6 +125,8 @@ def bytecode(
     for instruction, opcode in zip(operations, resolved_opcodes):
         if hasattr(instruction, "value"):
             immediate = instruction.value
+        elif hasattr(instruction, "index"):
+            immediate = instruction.index
         elif hasattr(instruction, "offset"):
             immediate = instruction.offset
         elif hasattr(instruction, "location"):

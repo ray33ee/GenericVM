@@ -101,7 +101,8 @@ def __gvm_list_pop_1(descriptor: ptr, index: int) -> int:
     length: int = descriptor[1]
     if index < 0:
         index = index + length
-    assert index >= 0 and index < length
+    if index < 0 or index >= length:
+        return 0
     data: ptr = cast_ptr(descriptor[0])
     result: int = data[index]
     i: int = index
@@ -115,7 +116,8 @@ def __gvm_list_pop_2(descriptor: ptr, index: int) -> tuple[int, int]:
     length: int = descriptor[1]
     if index < 0:
         index = index + length
-    assert index >= 0 and index < length
+    if index < 0 or index >= length:
+        return (0, 0)
     data: ptr = cast_ptr(descriptor[0])
     result0: int = data[index * 2]
     result1: int = data[index * 2 + 1]

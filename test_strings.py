@@ -78,7 +78,9 @@ def main():
         instructions = compile_source('result = "left" + "right"\nresult\n')
 
         self.assertLess(len(instructions), 200)
-        self.assertEqual(sum(isinstance(item, ir.LocalAlloc) for item in instructions), 1)
+        # One allocation reserves the global result slot; the other belongs to
+        # the single linked string-concatenation runtime function.
+        self.assertEqual(sum(isinstance(item, ir.Alloc) for item in instructions), 2)
         self.assertEqual(sum(isinstance(item, ir.Call) for item in instructions), 1)
 
     def test_string_method_return_type_can_be_inferred(self):
@@ -134,7 +136,6 @@ main()
 def main():
     return int("12x")
 ''')
-        self.assertFalse(any(isinstance(op, ir.Assert) for op in instructions))
         with redirect_stdout(io.StringIO()):
             self.assertEqual(interpreter.Interpreter().run(instructions), 12)
 

@@ -15,70 +15,54 @@ class Instruction:
         s.append(")")
         return "".join(s)
 
-###### Stack instructions
+###### Unified-memory stack instructions
 
-# Push the value of a local variable onto the op stack
-class OpStackPushLocal(Instruction):
+# Push the word at physical address BP - offset.
+class StackPushVariable(Instruction):
 
     OPCODE = 0
 
     def __init__(self, offset: int):
         self.offset = offset
 
-# Pop the top of the op stack into a local variable
-class OpStackPopLocal(Instruction):
+# Pop into the word at physical address BP - offset.
+class StackPopVariable(Instruction):
 
     OPCODE = 1
 
     def __init__(self, offset: int):
         self.offset = offset
 
-# Push the value of an argument variable onto the op stack
-class OpStackPushArg(Instruction):
+# Push a global word at memory_size - 1 - index.
+class StackPushGlobal(Instruction):
 
     OPCODE = 2
 
-    def __init__(self, offset: int):
-        self.offset = offset
+    def __init__(self, index: int):
+        self.index = index
 
-# Pop the top of the op stack into an argument variable
-class OpStackPopArg(Instruction):
+
+# Pop into the global word at memory_size - 1 - index.
+class StackPopGlobal(Instruction):
 
     OPCODE = 3
 
-    def __init__(self, offset: int):
-        self.offset = offset
+    def __init__(self, index: int):
+        self.index = index
 
-# Push a literal onto the op stack
-class OpStackPushLiteral(Instruction):
+# Push a literal onto the unified stack
+class StackPushLiteral(Instruction):
 
     OPCODE = 4
 
     def __init__(self, value):
         self.value = value
 
-# Pop a value off the op stack and push it into the call stack
-class OpStackPopToCallStack(Instruction):
+# Opcode 5 is intentionally retired with the former operand-to-call-stack
+# transfer instruction.
 
-    OPCODE = 5
-
-    pass
-
-# Push the value of a global variable onto the op stack
-class OpStackPushGlobal(Instruction):
-
-    OPCODE = 6
-
-    def __init__(self, offset: int):
-        self.offset = offset
-
-# Pop the top of the op stack into the global variable
-class OpStackPopGlobal(Instruction):
-
-    OPCODE = 7
-
-    def __init__(self, offset: int):
-        self.offset = offset
+# Opcodes 6 and 7 are intentionally retired with the separate global-access
+# instructions.
 
 
 ###### Jumps
@@ -91,7 +75,7 @@ class Jump(Instruction):
     def __init__(self, location):
         self.location = location
 
-# Jump if top of op stack is non-zero (pops op stack)
+# Jump if the top stack word is non-zero (and pop it)
 class JumpIfTrue(Instruction):
 
     OPCODE = 21
@@ -99,7 +83,7 @@ class JumpIfTrue(Instruction):
     def __init__(self, location):
         self.location = location
 
-# Jump if top of op stack is zero (pops op stack)
+# Jump if the top stack word is zero (and pop it)
 class JumpIfFalse(Instruction):
 
     OPCODE = 22
@@ -110,19 +94,19 @@ class JumpIfFalse(Instruction):
 
 ###### Conversion
 
-# Pop the int on the top of the op stack, convert to float, push it back on
+# Convert the top stack word from int to float
 class IntToFloat(Instruction):
     OPCODE = 30
     pass
 
-# Pop the float on the top of the op stack, convert to int, push it back on
+# Convert the top stack word from float to int
 class ConvertFloatToInt(Instruction):
     pass
 
 
 ###### Subroutines
 
-# Make a function call. Stores return address on call stack
+# Push the return address and previous BP, set BP to SP, and jump.
 class Call(Instruction):
 
     OPCODE = 40
@@ -130,7 +114,8 @@ class Call(Instruction):
     def __init__(self, location):
         self.location = location
 
-# Return to the link address stored in the call stack
+# Pop the frame and arguments, then return to its link address. Results have
+# already been written into caller-owned slots below the arguments.
 class Return(Instruction):
 
     OPCODE = 41
@@ -138,24 +123,16 @@ class Return(Instruction):
     def __init__(self, arg_count):
         self.arg_count = arg_count
 
-# Allocate machine words for local variables
-class LocalAlloc(Instruction):
+# Allocate zero-initialized machine words on the stack
+class Alloc(Instruction):
 
     OPCODE = 42
 
     def __init__(self, variable_count: int):
         self.variable_count = variable_count
 
-# Allocate machine words for global variables
-class GlobalAlloc(Instruction):
 
-    OPCODE = 43
-
-    def __init__(self, variable_count: int):
-        self.variable_count = variable_count
-
-
-###### Comparison - Pop two values off the op stack, compare them, then push the result. 0 for false and 1 for true
+###### Comparison - Pop two stack words and push 0 for false or 1 for true
 
 
 class Equal(Instruction):
@@ -198,7 +175,7 @@ class GreaterThanEqualTo(Instruction):
 ###### Built ins
 
 # Allows built-in instructions that can be called in code but executed by VM.
-# Built-in instructions pass arguments as immediates and DO NOT use the op stack OR the call stack (as a result they must pass constants)
+# Built-in instructions pass arguments as immediates and do not use the stack.
 class BuiltInInstruction(Instruction):
     def __init__(self, name, args):
         self.name = name
@@ -206,7 +183,8 @@ class BuiltInInstruction(Instruction):
 
 
 # Allows built-in functions that can be called in code but executed by VM.
-# Built-in functions pass arguments on the op stack and DO NOT use the call stack
+# Built-in functions consume arguments and produce results directly on the
+# unified stack; they do not create call frames.
 # It is down to the VM implementor to ensure they remove the correct number of items from the stack
 class BuiltInFunction(Instruction):
     def __init__(self, name, args):
@@ -371,22 +349,24 @@ class PrintFloat(Instruction):
 class Ternary(Instruction):
     pass
 
-###### Heap
+###### Unified memory
 
 class Store(Instruction):
+    """Store a word through an address in the VM's shared memory space."""
     OPCODE = 1004
 
 
 class Load(Instruction):
+    """Load a word through an address in the VM's shared memory space."""
     OPCODE = 1003
 
-###### Memory
-
 class Malloc(Instruction):
+    """Target-specific allocation returning a shared-memory address."""
     OPCODE = 1006
 
 
 class Free(Instruction):
+    """Target-specific release of a shared-memory address."""
     OPCODE = 1007
 
 
@@ -403,7 +383,7 @@ class Dupe(Instruction):
 
 
 class Drop(Instruction):
-    """Discard a compile-time number of words from the operand stack."""
+    """Discard a compile-time number of words from the unified stack."""
 
     OPCODE = 201
 
@@ -412,18 +392,10 @@ class Drop(Instruction):
 
 
 class Roll(Instruction):
-    """Move the word at a compile-time depth to the top of the operand stack."""
+    """Move the word at a compile-time depth to the top of the unified stack."""
 
     OPCODE = 202
 
     def __init__(self, depth: int):
         self.depth = depth
 
-
-
-
-###### Misc
-
-# If the top of the op stack is non-zero stop program
-class Assert(Instruction):
-    pass

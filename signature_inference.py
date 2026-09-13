@@ -166,6 +166,15 @@ class SignatureInferer:
         self._infer_constructor_fields()
 
     def infer(self):
+        main = self.functions.get("main")
+        if main is not None:
+            main.implicit_return_zero = True
+            if (
+                not self.explicit_returns[main.name]
+                and not self._contains_value_return(main.body)
+            ):
+                main.return_type = INT
+
         # Calls and returns can propagate types across several functions, so scan
         # until a complete pass makes no signature changes.
         for _ in range(max(2, len(self.functions) * 4 + 2)):
@@ -280,6 +289,20 @@ class SignatureInferer:
             node for node in self.module.body if isinstance(node, hr.Statement)
         ]
         self._scan_block(statements, environment, None)
+        # Function and method symbol tables share these Symbol objects. Publish
+        # top-level inference so global values can constrain expressions inside
+        # callables on the next fixed-point pass.
+        assigned_names = {
+            statement.lhs.id
+            for statement in statements
+            if isinstance(statement, hr.Assign) and isinstance(statement.lhs, hr.Name)
+        }
+        for name in assigned_names:
+            inferred = environment.get(name)
+            symbol = self.symbols.top_level[name]
+            if inferred is not None and symbol.type != inferred:
+                symbol.type = inferred
+                self.changed = True
 
     def _scan_function(self, function):
         function_symbols = self.symbols.functions[function.name][0]
@@ -290,6 +313,8 @@ class SignatureInferer:
 
         if not self.explicit_returns[function.name]:
             concrete_returns = [item for item in returns if item is not None]
+            if function.name == "main":
+                concrete_returns = [item for item in concrete_returns if item != NONE]
             if concrete_returns:
                 inferred = concrete_returns[0]
                 for candidate in concrete_returns[1:]:
@@ -349,8 +374,6 @@ class SignatureInferer:
                     environment[statement.target.id] = element_type
                 returns.extend(self._scan_nested_block(statement.body, environment, caller))
                 returns.extend(self._scan_nested_block(statement.orelse or [], environment, caller))
-            elif isinstance(statement, hr.Assert):
-                self._infer_expression(statement.test, environment, caller)
         return returns
 
     def _scan_nested_block(self, statements, environment, caller):
@@ -827,11 +850,11 @@ class SignatureInferer:
             and argument.annotation != actual_type
         ):
             if {argument.annotation, actual_type} == {INT, BOOL}:
-                argument.annotation = INT
-                symbol = self.symbols.functions[function.name][0][argument.name]
-                symbol.type = INT
-                self.changed = True
-                return
+                raise SignatureInferenceError(
+                    f"Cannot infer parameter '{argument.name}' of '{function.name}' from "
+                    f"mixed bool and int call arguments (line: {call.lineno}); add an "
+                    f"explicit annotation or make the argument types consistent"
+                )
             raise SignatureInferenceError(
                 f"Conflicting {'external' if external else 'recursive'} calls for parameter "
                 f"'{argument.name}' of "
@@ -880,6 +903,17 @@ class SignatureInferer:
                 if self._contains_return(statement.body):
                     return True
                 if hasattr(statement, "orelse") and self._contains_return(statement.orelse or []):
+                    return True
+        return False
+
+    def _contains_value_return(self, statements):
+        for statement in statements:
+            if isinstance(statement, hr.Return) and statement.value is not None:
+                return True
+            if isinstance(statement, (hr.If, hr.While, hr.For)):
+                if self._contains_value_return(statement.body):
+                    return True
+                if hasattr(statement, "orelse") and self._contains_value_return(statement.orelse or []):
                     return True
         return False
 

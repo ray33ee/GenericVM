@@ -56,6 +56,8 @@ class TypeChecker(hr.Walker):
         for function in (
             node for node in symbols.module.body if isinstance(node, hr.FunctionDef)
         ):
+            if function.name == "main" and function.return_type != INT:
+                self.error(function, "Function 'main' must return int")
             for argument in function.args:
                 self._validate_type(argument, argument.annotation)
                 self._reject_tuple_in_heap_container(argument, argument.annotation)
@@ -147,7 +149,11 @@ class TypeChecker(hr.Walker):
         for statement in node.body:
             self.walk(statement)
 
-        if node.return_type != NONE and not self._block_definitely_returns(node.body):
+        if (
+            node.return_type != NONE
+            and not getattr(node, "implicit_return_zero", False)
+            and not self._block_definitely_returns(node.body)
+        ):
             self.error(node, f"Function '{node.qualified_name}' does not return {node.return_type} on every path")
 
         self.context = previous_context
@@ -243,12 +249,19 @@ class TypeChecker(hr.Walker):
         if self.expected_return_type is None:
             self.error(node, "Return statement outside a function")
 
+        function = self.context[1] if self.context is not None else None
         if node.value is None:
             actual = NONE
         else:
             actual = self.infer(node.value, self.expected_return_type)
 
-        self.require(node, actual, self.expected_return_type, "Invalid return type")
+        if function is not None and function.name == "main":
+            if node.value is None:
+                self.error(node, "Function 'main' must return int; bare return is not allowed")
+            if actual != INT:
+                self.error(node, f"Invalid return type: expected {INT}, found {actual}")
+        else:
+            self.require(node, actual, self.expected_return_type, "Invalid return type")
 
     def visit_Expr(self, node):
         self.infer(node.expr)
@@ -262,9 +275,6 @@ class TypeChecker(hr.Walker):
         self._check_condition(node.condition)
         self.traverse(node.body)
         self.traverse(node.orelse)
-
-    def visit_Assert(self, node):
-        self._check_condition(node.test)
 
     def visit_For(self, node):
         target_symbol = self.symbol(node.target)
